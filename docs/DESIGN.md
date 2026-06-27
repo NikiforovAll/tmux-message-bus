@@ -112,7 +112,7 @@ CREATE TABLE messages (
 
 - **Register** (SessionStart hook): `UPSERT agents` keyed by `agent_id` (`$BUS_AGENT_ID`), refreshing `pid`/`pane`/`window`/`session`/`last_seen`. Sweep: mark `status='dead'` where pid is gone; reset stale `claimed` messages back to `new`.
 - **Send**: resolve target (name / `agent_id`) -> live agent via `agents`. `INSERT messages (... to_agent=:id, status='new')`. Optionally ring the doorbell.
-- **Doorbell** (wake): resolve `agent_id -> pid -> current pane` live (so window/pane moves don't matter), then `send-keys` a tiny fixed sentinel (e.g. `<<bus>>` + Enter) so an idle peer takes a turn. **Never carries content.**
+- **Doorbell** (wake): resolve `agent_id -> pid -> current pane` live (so window/pane moves don't matter), then `send-keys` a tiny fixed sentinel (`<<bus>>` + Enter) so an idle peer takes a turn. **Never carries content.** On the peer, a **UserPromptSubmit** hook recognizes the sentinel and drains the mailbox right then (claim -> inject framed messages as `additionalContext` -> ack), so the wake and the drain happen in the same turn (validated). The Stop-hook drain still covers mail that lands while the agent is mid-turn.
 - **Receive** (Stop-hook drain): when the peer finishes a turn, the Stop hook claims its mail atomically
   ```sql
   UPDATE messages SET status='claimed', claimed_at=:now
@@ -150,15 +150,16 @@ Spike in `scratchpad/bus-spike` (project-local `.claude/settings.json` Stop hook
 - **`decision:block` re-prompts: CONFIRMED.** A Stop hook emitting `{decision:block, reason}` makes the agent continue the turn and act on the reason. The load-bearing assumption holds.
 - **Loop guard: CONFIRMED.** Clear-on-read -> the next Stop sees an empty mailbox and allows termination.
 - **Trust boundary: CONFIRMED REAL, mitigation found.** Imperative injected reasons are refused as prompt-injection; provenance-framed informational reasons are accepted. See the framing requirement under Flows -> Receive.
+- **Doorbell + sentinel: CONFIRMED.** `send-keys "<<bus>>"` + Enter reliably wakes an idle peer. A **UserPromptSubmit** hook intercepts the `<<bus>>` sentinel, drains the mailbox, and injects the (provenance-framed) messages as `additionalContext` — the peer acted on them immediately and respected receiver agency (declined an outward-facing merge without user go-ahead). This gives a **second drain path** that resolves the "idle peer has no Stop event" gap: UserPromptSubmit drains on the doorbell wake; the Stop hook drains mail that arrived while the agent was mid-turn. (Cosmetic only: the literal `<<bus>>` shows as the user prompt in the transcript.)
+- **`--resume` keeps `session_id`: CONFIRMED.** A SessionStart hook logged the same `session_id` on `startup` and on `--resume <id>` (`source=resume`), while the pane moved (`%17`->`%18`). So `agent_id = f(session_id)` survives resume and the mailbox does not orphan; the mutable-location / stable-identity split holds. `--fork-session` mints a new id -> new agent, by design.
 
 Also settled earlier in the same investigation: `sqlite3` CLI is **absent** on this host but `node:sqlite` (Node v24) provides WAL + `busy_timeout` + `RETURNING` -> the core is a **node-based `bus` CLI**, not shell+sqlite3. The pid anchor must come from `tmux display -t "$TMUX_PANE" '#{pane_pid}'` (Git Bash `$PPID` is unreliable, observed as `1`), then re-resolve the pane live by matching `pane_pid`.
 
 ## Open questions
 
-- Sentinel doorbell: does submitting `<<bus>>` reliably trigger a turn on an idle peer without confusing it? Needs a UserPromptSubmit hook to intercept the sentinel and convert it to a drain (and suppress it as a literal prompt). Alternative: a `/bus drain` slash command as the sentinel. (Untested.)
 - `BUS_AGENT_ID` seeding for non-Claude agents — who sets it at launch (the Claude adapter launcher does it for Claude; other agents need their own convention).
-- Heartbeat cadence for `last_seen` (touch on each SessionStart + Stop drain is likely enough; no separate timer).
-- **Does `--resume` keep the same `session_id`?** `agent_id = f(session_id)` and mailbox continuity depend on it; if resume mints a new id the mailbox orphans. (Untested — verify alongside the doorbell.)
+- Heartbeat cadence for `last_seen` (touch on each SessionStart + Stop drain + UserPromptSubmit doorbell is likely enough; no separate timer).
+- Cosmetics: the literal `<<bus>>` sentinel shows in the transcript. Acceptable; could be reduced with a `/bus drain` slash command instead, at the cost of the sentinel being less universal.
 
 ## Gaps to address during implementation (from the 2026-06-27 review)
 
