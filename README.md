@@ -4,22 +4,24 @@ Reliable, durable async messaging between independent agent instances running in
 
 Replaces the fragile `send-keys`-as-transport pattern. The filesystem (a single SQLite-WAL DB) is the real transport; `send-keys` is demoted to an optional best-effort doorbell.
 
-> Status: **design phase.** See [`docs/DESIGN.md`](docs/DESIGN.md) for the locked architecture, identity model, schema, flows, and phased plan.
+> Status: **implemented** (core + Claude adapter), validated end-to-end across two tmux sessions. See [`docs/DESIGN.md`](docs/DESIGN.md) for the architecture, identity model, schema, and flows; [`core/README.md`](core/README.md) for the `bus` CLI.
 
 ## Layout
 
 ```
 .claude-plugin/marketplace.json   # marketplace listing the Claude adapter plugin
 core/                             # agent-agnostic bus (NOT a plugin)
+  bin/bus.mjs                     # the `bus` CLI (node:sqlite)
+  src/                            # db, identity, agents, messages
 plugins/
   tmux-message-bus/               # the Claude Code adapter, an installable plugin
     .claude-plugin/plugin.json
-    hooks/                        # SessionStart register + Stop-hook drain
-    skills/bus/                   # /bus skill (send/list/reply)
+    hooks/                        # SessionStart register + Stop drain + UPS doorbell
+    skills/bus/                   # /bus skill (list/inbox/send/reply)
 docs/DESIGN.md
 ```
 
-- **`core/`** — agent-agnostic bus: `bus.db`, schema, and the `bus` shell helpers (`register`/`list`/`send`/`claim`/`ack`/`sweep`/`doorbell`). Knows nothing about Claude. Not a plugin — any agent calls these helpers from its own trigger.
+- **`core/`** — agent-agnostic bus: `bus.db`, schema, and the `bus` CLI (`init`/`register`/`list`/`send`/`reply`/`inbox`/`claim`/`ack`/`sweep`/`prune`/`doorbell`). A Node program (`node:sqlite`, Node ≥ 22). Knows nothing about Claude. Not a plugin — any agent with `BUS_AGENT_ID` set calls these from its own trigger.
 - **`plugins/tmux-message-bus/`** — the Claude Code adapter, packaged as its own installable plugin (SessionStart register hook + Stop-hook drain + `decision:block` injection + doorbell sentinel). Installed via this repo's marketplace, separately from both the core and the `tmux` plugin.
 
 ## Install (Claude adapter)

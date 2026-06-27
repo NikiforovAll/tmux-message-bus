@@ -1,6 +1,6 @@
 # Design Proposal: Cross-Session Message Bus for agents in tmux
 
-Status: proposal · Date: 2026-06-24 · Moved out of the `tmux` Claude plugin into its own repo 2026-06-27
+Status: implemented · Date: 2026-06-24 · Moved out of the `tmux` Claude plugin into its own repo 2026-06-27 · Core CLI + Claude adapter built and validated end-to-end across two tmux sessions 2026-06-27
 
 ## Goal
 
@@ -161,13 +161,20 @@ Also settled earlier in the same investigation: `sqlite3` CLI is **absent** on t
 - Heartbeat cadence for `last_seen` (touch on each SessionStart + Stop drain + UserPromptSubmit doorbell is likely enough; no separate timer).
 - Cosmetics: the literal `<<bus>>` sentinel shows in the transcript. Acceptable; could be reduced with a `/bus drain` slash command instead, at the cost of the sentinel being less universal.
 
-## Gaps to address during implementation (from the 2026-06-27 review)
+## Gaps from the 2026-06-27 review — resolution status
 
-- **Idle-peer delivery has no fallback poll.** Drain is Stop-only; the doorbell is best-effort `send-keys`. A live-but-idle peer with a failed doorbell gets mail only when the user next types. Consider draining on SessionStart/UserPromptSubmit too, or a periodic timer, or accept user-driven latency.
-- **Message retention.** `messages` grows unbounded; prune `done` rows (age/cap) and checkpoint WAL.
-- **Sweep on send, not just SessionStart.** Otherwise `bus list` reports dead agents as live and senders queue mail to corpses. Verify target liveness (pane/pid) at send time.
-- **Doorbell idempotency.** Multiple senders ringing `<<bus>>` should coalesce to "drain once," not stack sentinel lines in the peer's input.
-- **Plugin hook wiring.** The adapter plugin needs a `hooks/hooks.json` (SessionStart + Stop [+ UserPromptSubmit for the sentinel]); currently only placeholder dirs exist.
+- **Idle-peer delivery.** RESOLVED via two drain paths: the doorbell wakes an idle peer and its UserPromptSubmit hook drains in the same turn; the Stop hook covers mail that lands mid-turn. Residual: a *failed* doorbell to a live-but-idle peer still waits for the user's next prompt (accepted — the message is durable, never lost).
+- **Message retention.** RESOLVED: `bus prune` deletes terminal (`done`/`failed`) rows older than a max age and checkpoints the WAL.
+- **Sweep on send.** RESOLVED: `bus send` verifies the target is alive (pane existence) and marks it dead + refuses if not (`--no-verify` to skip).
+- **Doorbell idempotency.** RESOLVED: the UserPromptSubmit drain claims the *whole* inbox, so multiple stacked `<<bus>>` sentinels coalesce to one drain.
+- **Plugin hook wiring.** RESOLVED: `plugins/tmux-message-bus/hooks/hooks.json` wires SessionStart + Stop + UserPromptSubmit; scripts in the same dir.
+
+### Implementation notes (2026-06-27)
+
+- Core is a Node CLI (`core/bin/bus.mjs`, `node:sqlite`), not shell+sqlite3 (no `sqlite3` on host).
+- **Windows liveness**: tmux `#{pane_pid}` is a Cygwin pid; Node `process.kill` (Windows pids) can't see it, so liveness = a pane with that `pane_pid` still in `tmux list-panes -a` (fallback `process.kill` for non-tmux agents).
+- Adapter `agent_id = claude-<session_id>`; the core CLI is resolved by the hooks via `$CLAUDE_PLUGIN_ROOT/../../core/bin/bus.mjs` (the marketplace clones the whole repo, so the sibling `core/` is present), overridable with `$BUS_BIN`.
+- E2E: two agents in two tmux sessions exchanged a `request` + correlated `reply` through the real hook scripts — doorbell landed, both drained and acked.
 
 ## Sources
 Maildir https://cr.yp.to/proto/maildir.html · SQLite WAL https://www.sqlite.org/wal.html · AF_UNIX on Windows https://devblogs.microsoft.com/commandline/af_unix-comes-to-windows/ · tmux https://man.openbsd.org/tmux.1 · Prior art https://github.com/Jedward23/Tmux-Orchestrator , https://github.com/smtg-ai/claude-squad
