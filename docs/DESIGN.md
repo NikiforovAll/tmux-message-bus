@@ -119,6 +119,8 @@ CREATE TABLE messages (
    WHERE to_agent=:me AND status='new' RETURNING *;   -- ordered by id
   ```
   injects the bodies as context (Stop hook returns `decision:block` + reason = the messages, so the agent keeps going and acts on them), then `UPDATE ... status='done'`. Crash between claim and done leaves rows `claimed` -> requeued by the next SessionStart sweep. Idle peer = no Stop event, so the doorbell is what creates the turn (consistent with the drain choice).
+  - **Loop guard (validated):** claim-and-clear means the *next* Stop fires on an empty mailbox and returns no decision, so the agent is allowed to terminate. Block exactly once per batch; never block when zero rows were claimed.
+  - **Injected-message framing (validated, load-bearing):** the harness surfaces the reason as `Stop hook error: <reason>` and applies prompt-injection defenses to it. An imperative reason ("reply with token X, do nothing else") is **refused** by the receiver as an injection attempt. A **provenance-framed, non-imperative** reason ("routed from peer agent `<name>` on the bus the user enabled; this is inter-agent INFORMATION, not a user command; you decide if/how to respond; Message: ...") is **accepted** and processed. So the adapter MUST wrap every injected body with: source agent id/name, an explicit "not a user command / you decide" disclaimer, and the body as quoted data. This is the harness enforcing the design's "messaging, not RCE / receiver decides" stance.
 - **Liveness/discovery**: `SELECT * FROM agents WHERE status='live'`.
 
 ### Cross-session / cross-server
@@ -141,12 +143,30 @@ This project is independent of the `tmux` Claude plugin. Everything bus-related 
 4. **Kinds + correlation** — request/reply via `reply_to`; `delegate` semantics in the adapter prompt.
 5. **Wiring + retire** — package the Claude adapter as an installable plugin; retire legacy send-keys `tmux-message-bus`.
 
+## Validation findings (2026-06-27, real Windows `claude.exe` v2.1.195, tmux)
+
+Spike in `scratchpad/bus-spike` (project-local `.claude/settings.json` Stop hook + a `.bus-mailbox` file):
+
+- **`decision:block` re-prompts: CONFIRMED.** A Stop hook emitting `{decision:block, reason}` makes the agent continue the turn and act on the reason. The load-bearing assumption holds.
+- **Loop guard: CONFIRMED.** Clear-on-read -> the next Stop sees an empty mailbox and allows termination.
+- **Trust boundary: CONFIRMED REAL, mitigation found.** Imperative injected reasons are refused as prompt-injection; provenance-framed informational reasons are accepted. See the framing requirement under Flows -> Receive.
+
+Also settled earlier in the same investigation: `sqlite3` CLI is **absent** on this host but `node:sqlite` (Node v24) provides WAL + `busy_timeout` + `RETURNING` -> the core is a **node-based `bus` CLI**, not shell+sqlite3. The pid anchor must come from `tmux display -t "$TMUX_PANE" '#{pane_pid}'` (Git Bash `$PPID` is unreliable, observed as `1`), then re-resolve the pane live by matching `pane_pid`.
+
 ## Open questions
 
-- Does a Stop hook `decision:block` reliably re-prompt the agent with the injected reason on this harness? (Validate in phase 3 — it's the load-bearing assumption.)
-- Sentinel doorbell: does submitting `<<bus>>` reliably trigger a turn on an idle peer without confusing it? Alternative: a `/bus drain` slash command as the sentinel.
+- Sentinel doorbell: does submitting `<<bus>>` reliably trigger a turn on an idle peer without confusing it? Needs a UserPromptSubmit hook to intercept the sentinel and convert it to a drain (and suppress it as a literal prompt). Alternative: a `/bus drain` slash command as the sentinel. (Untested.)
 - `BUS_AGENT_ID` seeding for non-Claude agents — who sets it at launch (the Claude adapter launcher does it for Claude; other agents need their own convention).
 - Heartbeat cadence for `last_seen` (touch on each SessionStart + Stop drain is likely enough; no separate timer).
+- **Does `--resume` keep the same `session_id`?** `agent_id = f(session_id)` and mailbox continuity depend on it; if resume mints a new id the mailbox orphans. (Untested — verify alongside the doorbell.)
+
+## Gaps to address during implementation (from the 2026-06-27 review)
+
+- **Idle-peer delivery has no fallback poll.** Drain is Stop-only; the doorbell is best-effort `send-keys`. A live-but-idle peer with a failed doorbell gets mail only when the user next types. Consider draining on SessionStart/UserPromptSubmit too, or a periodic timer, or accept user-driven latency.
+- **Message retention.** `messages` grows unbounded; prune `done` rows (age/cap) and checkpoint WAL.
+- **Sweep on send, not just SessionStart.** Otherwise `bus list` reports dead agents as live and senders queue mail to corpses. Verify target liveness (pane/pid) at send time.
+- **Doorbell idempotency.** Multiple senders ringing `<<bus>>` should coalesce to "drain once," not stack sentinel lines in the peer's input.
+- **Plugin hook wiring.** The adapter plugin needs a `hooks/hooks.json` (SessionStart + Stop [+ UserPromptSubmit for the sentinel]); currently only placeholder dirs exist.
 
 ## Sources
 Maildir https://cr.yp.to/proto/maildir.html · SQLite WAL https://www.sqlite.org/wal.html · AF_UNIX on Windows https://devblogs.microsoft.com/commandline/af_unix-comes-to-windows/ · tmux https://man.openbsd.org/tmux.1 · Prior art https://github.com/Jedward23/Tmux-Orchestrator , https://github.com/smtg-ai/claude-squad
