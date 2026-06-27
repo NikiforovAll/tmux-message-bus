@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Deterministic transport eval for the bus (cases T1..T12).
+# Self-contained: isolated DB, throwaway tmux sessions, real CLI + adapter hooks.
+# Prints PASS/FAIL per case; exits non-zero on any failure. Leaves no state.
+set -uo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+BUS_BIN="$REPO/core/bin/bus.mjs"
+export CLAUDE_PLUGIN_ROOT="$REPO/plugins/tmux-message-bus"
+H="$CLAUDE_PLUGIN_ROOT/hooks"
+WORK="$(mktemp -d)"
+export BUS_DB="$WORK/bus.db"
+BUS() { node "$BUS_BIN" "$@"; }
+J() { node -e 'const fs=require("fs");const d=JSON.parse(fs.readFileSync(0));const v=eval(process.argv[1]);process.stdout.write(v==null?"":String(v))' "$1"; }
+
+PASS=0; FAIL=0
+ok()   { echo "  PASS  $1"; PASS=$((PASS+1)); }
+bad()  { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
+chk()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want=$3 got=$2)"; fi; }
+
+cleanup() { tmux kill-session -t evalA 2>/dev/null; tmux kill-session -t evalB 2>/dev/null; rm -rf "$WORK"; }
+trap cleanup EXIT
+
+echo "== bus transport eval =="
+echo "DB: $BUS_DB"
+
+# --- T1 idempotent init ---
+BUS init >/dev/null; BUS init >/dev/null
+MODE=$(node --input-type=module -e 'import{DatabaseSync}from"node:sqlite";const db=new DatabaseSync(process.env.BUS_DB);console.log(db.prepare("PRAGMA journal_mode").get().journal_mode)')
+chk "T1 init idempotent + WAL" "$MODE" "wal"
+
+# --- two throwaway panes in two sessions ---
+read PANE_A PP_A <<< "$(tmux new-session -d -s evalA -P -F '#{pane_id} #{pane_pid}' 'cat')"
+read PANE_B PP_B <<< "$(tmux new-session -d -s evalB -P -F '#{pane_id} #{pane_pid}' 'cat')"
+
+# register both via the REAL SessionStart hook
+CLAUDE_PROJECT_DIR="$REPO" TMUX_PANE="$PANE_A" BUS_BIN="$BUS_BIN" \
+  bash -c 'printf "{\"session_id\":\"evA\",\"source\":\"startup\"}" | bash "'"$H"'/session-start.sh"' >/dev/null
+CLAUDE_PROJECT_DIR="$REPO" TMUX_PANE="$PANE_B" BUS_BIN="$BUS_BIN" \
+  bash -c 'printf "{\"session_id\":\"evB\",\"source\":\"startup\"}" | bash "'"$H"'/session-start.sh"' >/dev/null
+NLIVE=$(BUS list | J 'd.agents.length')
+chk "register two live agents" "$NLIVE" "2"
+
+# --- T2 UPSERT preserves started_at ---
+S1=$(BUS list | J 'd.agents.find(a=>a.agent_id=="claude-evA").started_at')
+CLAUDE_PROJECT_DIR="$REPO" TMUX_PANE="$PANE_A" BUS_BIN="$BUS_BIN" \
+  bash -c 'printf "{\"session_id\":\"evA\",\"source\":\"resume\"}" | bash "'"$H"'/session-start.sh"' >/dev/null
+S2=$(BUS list | J 'd.agents.find(a=>a.agent_id=="claude-evA").started_at')
+NLIVE2=$(BUS list | J 'd.agents.length')
+chk "T2 UPSERT preserves started_at" "$S1" "$S2"
+chk "T2 no duplicate row" "$NLIVE2" "2"
+
+# --- T3 identity survives pane move ---
+tmux move-window -s evalA -t evalA: 2>/dev/null || true
+NEWWIN=$(tmux new-window -t evalA -P -F '#{window_index}')
+tmux move-pane -s "$PANE_A" -t "evalA:$NEWWIN" 2>/dev/null
+CLAUDE_PROJECT_DIR="$REPO" TMUX_PANE="$PANE_A" BUS_BIN="$BUS_BIN" \
+  bash -c 'printf "{\"session_id\":\"evA\",\"source\":\"resume\"}" | bash "'"$H"'/session-start.sh"' >/dev/null 2>&1
+STILL=$(BUS list | J 'd.agents.filter(a=>a.agent_id=="claude-evA").length')
+chk "T3 identity survives pane move" "$STILL" "1"
+
+# --- T4 durable delivery (inbox before claim) ---
+BUS_AGENT_ID="claude-evA" BUS send --to claude-evB --kind request --subject status --body "build green?" >/dev/null
+INBOX=$(BUS inbox --me claude-evB | J 'd.messages.length')
+chk "T4 durable delivery (inbox before claim)" "$INBOX" "1"
+
+# --- T5 atomic claim under concurrency ---
+for i in $(seq 1 50); do BUS_AGENT_ID="claude-evA" BUS send --to claude-evB --kind notify --body "m$i" >/dev/null; done
+BUS claim --me claude-evB > "$WORK/c1.json" &
+BUS claim --me claude-evB > "$WORK/c2.json" &
+wait
+C1=$(J 'd.messages.length' < "$WORK/c1.json")
+C2=$(J 'd.messages.length' < "$WORK/c2.json")
+OVERLAP=$(node -e 'const fs=require("fs");const a=JSON.parse(fs.readFileSync(process.argv[1])).messages.map(m=>m.id);const b=new Set(JSON.parse(fs.readFileSync(process.argv[2])).messages.map(m=>m.id));console.log(a.filter(x=>b.has(x)).length)' "$WORK/c1.json" "$WORK/c2.json")
+chk "T5 claim partition disjoint" "$OVERLAP" "0"
+chk "T5 claim union complete (51)" "$((C1+C2))" "51"
+
+# --- T6 ack lifecycle ---
+IDS=$(node -e 'const fs=require("fs");const ids=[...JSON.parse(fs.readFileSync(process.argv[1])).messages,...JSON.parse(fs.readFileSync(process.argv[2])).messages].map(m=>m.id);console.log(ids.join(","))' "$WORK/c1.json" "$WORK/c2.json")
+BUS ack --ids "$IDS" >/dev/null
+RECLAIM=$(BUS claim --me claude-evB | J 'd.messages.length')
+chk "T6 acked rows not re-claimed" "$RECLAIM" "0"
+
+# --- T7 doorbell delivery ---
+BUS doorbell --to claude-evB >/dev/null; sleep 0.3
+RANG=$(tmux capture-pane -t "$PANE_B" -p | grep -c 'bus')
+[ "$RANG" -ge 1 ] && ok "T7 doorbell lands <<bus>> in pane" || bad "T7 doorbell (got $RANG)"
+
+# --- T8 doorbell to dead/unknown target (no throw, not rung) ---
+RUNGD=$(BUS doorbell --to nonexistent-agent 2>/dev/null | J 'String(d.rung)')
+if [ "$RUNGD" = "false" ] || [ -z "$RUNGD" ]; then ok "T8 doorbell unknown target -> not rung / no throw"; else bad "T8 dead doorbell (got $RUNGD)"; fi
+
+# --- T9 sweep marks dead + requeues stale claim ---
+BUS_AGENT_ID="claude-evA" BUS send --to claude-evB --kind notify --body "stale" >/dev/null
+SID=$(BUS claim --me claude-evB | J 'd.messages[0].id')
+tmux kill-session -t evalB 2>/dev/null; sleep 0.3
+BUS sweep --stale-ms 0 >/dev/null
+DEADB=$(BUS list --all | J 'd.agents.find(a=>a.agent_id=="claude-evB").status')
+REQUEUED=$(node --input-type=module -e 'import{DatabaseSync}from"node:sqlite";const db=new DatabaseSync(process.env.BUS_DB);console.log(db.prepare("SELECT status FROM messages WHERE id=?").get(Number(process.argv[1])).status)' "$SID")
+chk "T9 sweep marks dead agent" "$DEADB" "dead"
+chk "T9 sweep requeues stale claim" "$REQUEUED" "new"
+
+# --- T10 reply correlation (sender must be live: reply targets it) ---
+BUS_AGENT_ID="claude-evX" BUS register --pid "$PP_A" --name evx >/dev/null
+MID=$(BUS_AGENT_ID="claude-evX" BUS send --to claude-evA --kind request --body "ping" | J 'd.message.id')
+RTO=$(BUS_AGENT_ID="claude-evA" BUS reply --to-msg "$MID" --body "pong" | J 'd.message.reply_to')
+chk "T10 reply sets reply_to" "$RTO" "$MID"
+
+# --- T11 prune retention ---
+BUS ack --ids "$SID" >/dev/null 2>&1 || true
+BEFORE=$(node --input-type=module -e 'import{DatabaseSync}from"node:sqlite";const db=new DatabaseSync(process.env.BUS_DB);console.log(db.prepare("SELECT count(*) c FROM messages").get().c)')
+BUS prune --max-age-ms 0 >/dev/null
+NEWCLAIMED=$(node --input-type=module -e 'import{DatabaseSync}from"node:sqlite";const db=new DatabaseSync(process.env.BUS_DB);console.log(db.prepare("SELECT count(*) c FROM messages WHERE status IN (?,?)").get("new","claimed").c)')
+AFTER=$(node --input-type=module -e 'import{DatabaseSync}from"node:sqlite";const db=new DatabaseSync(process.env.BUS_DB);console.log(db.prepare("SELECT count(*) c FROM messages").get().c)')
+[ "$AFTER" -le "$BEFORE" ] && ok "T11 prune deletes old done/failed" || bad "T11 prune (before=$BEFORE after=$AFTER)"
+
+echo ""
+echo "== $PASS passed, $FAIL failed =="
+[ "$FAIL" -eq 0 ]
