@@ -1,6 +1,6 @@
 # Claude Code adapter
 
-Wires the agent-agnostic [`core/`](../../core) bus into Claude Code's lifecycle. Packaged as its own installable plugin — independent of the `tmux` plugin.
+Wires the agent-agnostic [`core/`](./core) bus into Claude Code's lifecycle. Packaged as its own installable plugin — independent of the `tmux` plugin. The core CLI is bundled inside the plugin (`core/`) so a marketplace install, which copies only the plugin dir, still ships it.
 
 ## What it does
 
@@ -17,8 +17,9 @@ All injected bodies are **provenance-framed** by `frame.mjs` — "inter-agent IN
 The hooks resolve the `bus` CLI in this order (`lib.sh`):
 
 1. `$BUS_BIN` — explicit path to a `bus` executable (override).
-2. `$CLAUDE_PLUGIN_ROOT/../../core/bin/bus.mjs` — the sibling core in the cloned marketplace repo (default; requires Node ≥ 22).
-3. `bus` on `PATH`.
+2. `$CLAUDE_PLUGIN_ROOT/core/bin/bus.mjs` — core bundled inside the plugin (default; requires Node ≥ 22). Survives a marketplace install because it lives within the copied plugin dir.
+3. `$CLAUDE_PLUGIN_ROOT/../../core/bin/bus.mjs` — legacy repo layout (pre-relocation) fallback.
+4. `bus` on `PATH`.
 
 ## Install
 
@@ -27,7 +28,7 @@ The hooks resolve the `bus` CLI in this order (`lib.sh`):
 /plugin install tmux-message-bus@tmux-message-bus
 ```
 
-Installing the marketplace clones the whole repo, so the sibling `core/` is present and resolution #2 works with no extra setup. Restart the session (or start a new one) so the SessionStart hook registers the instance.
+The core CLI ships inside the plugin dir, so resolution #2 works on a fresh install with no extra setup. Restart the session (or start a new one) so the SessionStart hook registers the instance.
 
 ## Verify
 

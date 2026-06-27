@@ -9,3 +9,6 @@ bus.db-shm
 # os / editor
 .DS_Store
 Thumbs.db
+
+# local claude project settings
+.claude/

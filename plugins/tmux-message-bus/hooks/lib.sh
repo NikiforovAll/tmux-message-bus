@@ -2,15 +2,21 @@
 # Plain ASCII; Git Bash / MSYS2 first-class.
 
 # Resolve the agent-agnostic core `bus` CLI, in priority order:
-#   1. $BUS_BIN            explicit override (a `bus` executable on PATH)
-#   2. sibling core in the cloned marketplace repo (../../core/bin/bus.mjs)
-#   3. `bus` on PATH
-BUS_CORE="${CLAUDE_PLUGIN_ROOT:-}/../../core/bin/bus.mjs"
+#   1. $BUS_BIN                              explicit override
+#   2. $CLAUDE_PLUGIN_ROOT/core/bin/bus.mjs  core bundled INSIDE the plugin
+#        (the only layout that survives a marketplace install -- the cache copies
+#        the plugin dir only, so core must live within it)
+#   3. $CLAUDE_PLUGIN_ROOT/../../core/...    legacy repo layout (pre-relocation)
+#   4. `bus` on PATH
+BUS_CORE="${CLAUDE_PLUGIN_ROOT:-}/core/bin/bus.mjs"
+BUS_CORE_LEGACY="${CLAUDE_PLUGIN_ROOT:-}/../../core/bin/bus.mjs"
 bus() {
   if [ -n "${BUS_BIN:-}" ]; then
     "$BUS_BIN" "$@"
   elif [ -f "$BUS_CORE" ]; then
     node "$BUS_CORE" "$@"
+  elif [ -f "$BUS_CORE_LEGACY" ]; then
+    node "$BUS_CORE_LEGACY" "$@"
   else
     command bus "$@"
   fi

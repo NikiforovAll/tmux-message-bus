@@ -5,7 +5,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BUS_BIN="$REPO/core/bin/bus.mjs"
+BUS_BIN="$REPO/plugins/tmux-message-bus/core/bin/bus.mjs"
 export CLAUDE_PLUGIN_ROOT="$REPO/plugins/tmux-message-bus"
 H="$CLAUDE_PLUGIN_ROOT/hooks"
 WORK="$(mktemp -d)"

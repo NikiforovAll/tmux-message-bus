@@ -171,9 +171,9 @@ Also settled earlier in the same investigation: `sqlite3` CLI is **absent** on t
 
 ### Implementation notes (2026-06-27)
 
-- Core is a Node CLI (`core/bin/bus.mjs`, `node:sqlite`), not shell+sqlite3 (no `sqlite3` on host).
+- Core is a Node CLI (`plugins/tmux-message-bus/core/bin/bus.mjs`, `node:sqlite`), not shell+sqlite3 (no `sqlite3` on host). It is bundled inside the plugin so a marketplace install (which copies only the plugin dir) still ships it.
 - **Windows liveness**: tmux `#{pane_pid}` is a Cygwin pid; Node `process.kill` (Windows pids) can't see it, so liveness = a pane with that `pane_pid` still in `tmux list-panes -a` (fallback `process.kill` for non-tmux agents).
-- Adapter `agent_id = claude-<session_id>`; the core CLI is resolved by the hooks via `$CLAUDE_PLUGIN_ROOT/../../core/bin/bus.mjs` (the marketplace clones the whole repo, so the sibling `core/` is present), overridable with `$BUS_BIN`.
+- Adapter `agent_id = claude-<session_id>`; the core CLI is resolved by the hooks via `$CLAUDE_PLUGIN_ROOT/core/bin/bus.mjs` (bundled in the plugin → survives install), with a legacy `../../core` fallback, overridable with `$BUS_BIN`.
 - E2E: two agents in two tmux sessions exchanged a `request` + correlated `reply` through the real hook scripts — doorbell landed, both drained and acked.
 
 ## Sources
