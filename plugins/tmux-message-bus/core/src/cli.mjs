@@ -33,8 +33,9 @@ Commands:
   reply --to-msg <id>  Reply to a message (targets its sender, sets reply_to).
                          [--body .. | stdin] [--subject ..] [--doorbell]
                          [--no-verify] [--envelope <path|->]
-  inbox [--me <id>] [--status S]  Peek at mail without claiming (read-only).
-                         --status new|claimed|done|failed  (default: new)
+  inbox [--me <id>] [--peek] [--status S]  Read new mail; auto-acks (new->done).
+                         --peek  read-only, do not consume (leave for the drain).
+                         --status new|claimed|done|failed  (default: new; non-new is read-only)
   show <id> (alias get) Read a single message by id (read-only, no claim/ack).
   doorbell --to <t>    Ring an agent's doorbell (resolve pid->pane, send-keys).
   claim [--me <id>]    Atomically claim new mail (RETURNING), ordered by id.
@@ -63,6 +64,7 @@ const BOOLEAN_FLAGS = new Set([
   "fail",
   "dry-run",
   "no-verify",
+  "peek",
 ]);
 
 // Minimal long-flag parser: --key value (and --key=value). Bare positionals are

@@ -20,8 +20,9 @@ shell). So `send`/`reply`/`inbox` need no `--from`/`--me`; `bus whoami` confirms
 ## Subcommands
 
 - **`/bus list`** → `bus list` — live agents you can message.
-- **`/bus inbox`** → `bus inbox` — peek unclaimed mail read-only; the Stop/doorbell
-  drain is what actually delivers + acks.
+- **`/bus inbox`** → `bus inbox` — read + consume your new mail (auto-acks
+  `new`→`done`, so the Stop/doorbell drain won't re-deliver it). Add `--peek` for a
+  read-only look that leaves mail for the drain.
 - **`/bus send <target> <message>`** → `bus send --to <target> --body <message> --doorbell`
   Durable INSERT + doorbell. `--kind request|delegate` for an ask; `--subject`.
   `<target>` resolves: `agent_id` (global) → `session:window` (cross-session) →

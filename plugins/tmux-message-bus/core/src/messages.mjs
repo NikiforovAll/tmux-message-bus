@@ -311,13 +311,27 @@ export function reply(opts) {
   });
 }
 
-// Read-only peek at an agent's mailbox (does NOT claim). Default: new mail.
+// Read an agent's mailbox. Default (new mail) AUTO-ACKS: claims and marks done
+// in one step (new -> done), so what you pull here won't be re-delivered by the
+// Stop/doorbell drain. Pass --peek for a read-only look that leaves mail for the
+// drain. A non-default --status view is always read-only (only 'new' mail is
+// consumable; claimed/done/failed are terminal-ish and just inspected).
 export function inbox(opts = {}) {
   const status = opts.status ?? "new";
-  const db = openDb();
+  const db = openDb({ create: true });
   try {
     const me = selfId(db, selfFlag(opts));
     if (!me) throw new Error("inbox: no identity ($BUS_AGENT_ID / $TMUX_PANE unset, no --me)");
+    if (status === "new" && !opts.peek) {
+      // UPDATE...RETURNING order isn't guaranteed; sort by id for a total order.
+      return db
+        .prepare(
+          "UPDATE messages SET status = 'done', claimed_at = :now " +
+            "WHERE to_agent = :me AND status = 'new' RETURNING *",
+        )
+        .all({ now: now(), me })
+        .sort((a, b) => a.id - b.id);
+    }
     return db
       .prepare("SELECT * FROM messages WHERE to_agent = ? AND status = ? ORDER BY id")
       .all(me, status);

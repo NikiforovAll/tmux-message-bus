@@ -63,10 +63,21 @@ CLAUDE_PROJECT_DIR="$REPO" TMUX_PANE="$PANE_A" BUS_BIN="$BUS_BIN" \
 STILL=$(BUS list | J 'd.agents.filter(a=>a.agent_id=="claude-evA").length')
 chk "T3 identity survives pane move" "$STILL" "1"
 
-# --- T4 durable delivery (inbox before claim) ---
+# --- T4 durable delivery (inbox --peek before claim, read-only) ---
 BUS_AGENT_ID="claude-evA" BUS send --to claude-evB --kind request --subject status --body "build green?" >/dev/null
-INBOX=$(BUS inbox --me claude-evB | J 'd.messages.length')
-chk "T4 durable delivery (inbox before claim)" "$INBOX" "1"
+INBOX=$(BUS inbox --me claude-evB --peek | J 'd.messages.length')
+chk "T4 durable delivery (inbox --peek before claim)" "$INBOX" "1"
+PEEKED=$(BUS inbox --me claude-evB --peek | J 'd.messages.length')
+chk "T4 --peek is read-only (still there)" "$PEEKED" "1"
+
+# --- T4b default inbox auto-acks (new -> done, isolated recipient) ---
+BUS_AGENT_ID="claude-evB" BUS send --to claude-evA --kind notify --body "ack me" >/dev/null
+AA1=$(BUS inbox --me claude-evA | J 'd.messages.length')
+chk "T4b auto-ack returns new mail" "$AA1" "1"
+AA2=$(BUS inbox --me claude-evA | J 'd.messages.length')
+chk "T4b auto-ack consumed (re-read empty)" "$AA2" "0"
+AADONE=$(BUS inbox --me claude-evA --status done | J 'd.messages.length')
+chk "T4b consumed mail is done" "$AADONE" "1"
 
 # --- T5 atomic claim under concurrency ---
 for i in $(seq 1 50); do BUS_AGENT_ID="claude-evA" BUS send --to claude-evB --kind notify --body "m$i" >/dev/null; done
