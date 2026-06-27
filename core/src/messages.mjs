@@ -14,6 +14,23 @@ function now() {
   return Date.now();
 }
 
+// Resolve the CALLING agent's own agent_id. Prefer an explicit value, then
+// $BUS_AGENT_ID. Otherwise self-locate via $TMUX_PANE against the live registry:
+// the agent's tool shell inherits TMUX_PANE, but a SessionStart hook's
+// `export BUS_AGENT_ID` runs in a subprocess and never reaches that shell.
+export function selfId(db, explicit) {
+  const id = explicit ?? process.env.BUS_AGENT_ID;
+  if (id) return id;
+  const pane = process.env.TMUX_PANE;
+  if (pane) {
+    const row = db
+      .prepare("SELECT agent_id FROM agents WHERE pane = ? AND status = 'live' ORDER BY last_seen DESC LIMIT 1")
+      .get(pane);
+    if (row) return row.agent_id;
+  }
+  return null;
+}
+
 // Resolve a --to target to a single live agent_id.
 // Exact agent_id wins; otherwise match live agents by name. Ambiguous -> throw
 // with the candidates so the caller can disambiguate.
@@ -49,9 +66,9 @@ export function send(opts) {
   if (!KINDS.has(kind)) {
     throw new Error(`send: invalid kind '${kind}' (notify|request|reply|delegate)`);
   }
-  const from_agent = opts.from ?? process.env.BUS_AGENT_ID ?? null;
   const db = openDb({ create: true });
   try {
+    const from_agent = selfId(db, opts.from);
     const to_agent = resolveTarget(db, opts.to);
     // Sweep-on-send: verify the target is still alive so we never queue mail to
     // a corpse and never report a dead agent as a live target. --no-verify skips.
@@ -120,11 +137,11 @@ export function reply(opts) {
 
 // Read-only peek at an agent's mailbox (does NOT claim). Default: new mail.
 export function inbox(opts = {}) {
-  const me = opts.me ?? process.env.BUS_AGENT_ID;
-  if (!me) throw new Error("inbox: BUS_AGENT_ID unset and no --me given");
   const status = opts.status ?? "new";
   const db = openDb();
   try {
+    const me = selfId(db, opts.me);
+    if (!me) throw new Error("inbox: no identity ($BUS_AGENT_ID / $TMUX_PANE unset, no --me)");
     return db
       .prepare("SELECT * FROM messages WHERE to_agent = ? AND status = ? ORDER BY id")
       .all(me, status);
@@ -179,10 +196,10 @@ export function prune(opts = {}) {
 // Single UPDATE...RETURNING so two concurrent drains never claim the same row.
 // Claim-and-clear is the loop guard: the next drain sees an empty inbox.
 export function claim(opts) {
-  const me = opts.me ?? process.env.BUS_AGENT_ID;
-  if (!me) throw new Error("claim: BUS_AGENT_ID unset and no --me given");
   const db = openDb({ create: true });
   try {
+    const me = selfId(db, opts.me);
+    if (!me) throw new Error("claim: no identity ($BUS_AGENT_ID / $TMUX_PANE unset, no --me)");
     return db
       .prepare(
         "UPDATE messages SET status = 'claimed', claimed_at = :now " +

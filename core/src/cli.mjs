@@ -1,7 +1,8 @@
 // Command dispatch for the `bus` CLI. Agent-agnostic core.
 import { initDb, dbPath } from "./db.mjs";
 import { register, list, sweep } from "./agents.mjs";
-import { send, claim, ack, doorbell, prune, reply, inbox } from "./messages.mjs";
+import { send, claim, ack, doorbell, prune, reply, inbox, selfId } from "./messages.mjs";
+import { openDb } from "./db.mjs";
 
 const USAGE = `bus — durable message bus for agents in tmux
 
@@ -30,6 +31,8 @@ Commands:
   doorbell --to <t>    Ring an agent's doorbell (resolve pid->pane, send-keys).
   claim [--me <id>]    Atomically claim new mail (RETURNING), ordered by id.
   ack --ids <i,..>     Mark claimed messages done (--fail marks failed).
+  whoami               Print this caller's own agent_id ($BUS_AGENT_ID, else
+                         self-located via $TMUX_PANE against the registry).
   list [--all]         List live agents (--all includes dead).
   sweep [--stale-ms N] Mark dead agents (pid gone), requeue orphaned claims.
   prune [--max-age-ms N] Delete old done/failed messages, checkpoint WAL.
@@ -102,6 +105,16 @@ export async function main(argv) {
     case "ack": {
       const r = ack(flags);
       process.stdout.write(JSON.stringify({ ok: true, ...r }) + "\n");
+      return 0;
+    }
+    case "whoami": {
+      const db = openDb({ create: true });
+      try {
+        const id = selfId(db, flags.id);
+        process.stdout.write(JSON.stringify({ ok: true, agent_id: id, pane: process.env.TMUX_PANE ?? null }) + "\n");
+      } finally {
+        db.close();
+      }
       return 0;
     }
     case "list": {

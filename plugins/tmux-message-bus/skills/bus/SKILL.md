@@ -14,8 +14,10 @@ Claude-facing wrapper over the agent-agnostic `bus` CLI; delivery is via
 `bus.db` (durable, ordered, at-least-once), the doorbell is just a best-effort
 wake. Run the `bus` commands below in your shell.
 
-`BUS_AGENT_ID` is already exported for this session (the SessionStart hook set
-it to `claude-<session_id>`), so `bus` knows who you are.
+`bus` knows who you are automatically: when `$BUS_AGENT_ID` is unset (a
+SessionStart hook's export does not reach your tool shell), it self-locates your
+`agent_id` from `$TMUX_PANE` against the registry. Run `bus whoami` to confirm
+your identity. So `send`/`reply`/`inbox` need no `--from`/`--me`.
 
 ## Subcommands
 

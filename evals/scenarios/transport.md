@@ -17,6 +17,7 @@ Mechanics of the bus, independent of any agent's judgment. All asserted by
 | T10 | Reply correlation | `reply --to-msg <id>` targets original sender, sets `reply_to = id`, kind `reply` |
 | T11 | Prune retention | `done`/`failed` older than max-age deleted; `new`/`claimed` untouched; WAL checkpointed |
 | T12 | Cross-session E2E | two agents in different tmux sessions complete request→drain→reply→drain through the real hook scripts; ledger shows both `done` |
+| T13 | `whoami` self-resolves identity | with `BUS_AGENT_ID` unset, `$TMUX_PANE` → registry → caller's own `agent_id` |
 
 ## Notes
 

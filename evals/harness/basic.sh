@@ -41,6 +41,10 @@ CLAUDE_PROJECT_DIR="$REPO" TMUX_PANE="$PANE_B" BUS_BIN="$BUS_BIN" \
 NLIVE=$(BUS list | J 'd.agents.length')
 chk "register two live agents" "$NLIVE" "2"
 
+# --- T13 whoami self-resolves identity from $TMUX_PANE (no BUS_AGENT_ID) ---
+WHO=$(env -u BUS_AGENT_ID TMUX_PANE="$PANE_A" node "$BUS_BIN" whoami | J 'd.agent_id')
+chk "T13 whoami self-resolves by pane" "$WHO" "claude-evA"
+
 # --- T2 UPSERT preserves started_at ---
 S1=$(BUS list | J 'd.agents.find(a=>a.agent_id=="claude-evA").started_at')
 CLAUDE_PROJECT_DIR="$REPO" TMUX_PANE="$PANE_A" BUS_BIN="$BUS_BIN" \
