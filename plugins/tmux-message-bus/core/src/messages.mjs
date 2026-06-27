@@ -14,10 +14,26 @@ function now() {
   return Date.now();
 }
 
+// Coerce a flag value to an integer, rejecting non-numeric input instead
+// of letting Number() yield a silent NaN that corrupts the query downstream.
+function toInt(value, label) {
+  const n = Number(value);
+  if (!Number.isInteger(n)) {
+    throw new Error(`${label}: '${value}' is not a valid integer`);
+  }
+  return n;
+}
+
 // Resolve the CALLING agent's own agent_id. Prefer an explicit value, then
 // $BUS_AGENT_ID. Otherwise self-locate via $TMUX_PANE against the live registry:
 // the agent's tool shell inherits TMUX_PANE, but a SessionStart hook's
 // `export BUS_AGENT_ID` runs in a subprocess and never reaches that shell.
+// Canonical self-identity flag is --me; --from (send/reply) and --id
+// (register/whoami) are accepted aliases for back-compat.
+export function selfFlag(opts) {
+  return opts.me ?? opts.from ?? opts.id;
+}
+
 export function selfId(db, explicit) {
   const id = explicit ?? process.env.BUS_AGENT_ID;
   if (id) return id;
@@ -33,9 +49,11 @@ export function selfId(db, explicit) {
 
 // Resolve a --to target to a single live agent_id.
 // Exact agent_id wins; otherwise match live agents by name. Ambiguous -> throw
-// with the candidates so the caller can disambiguate.
-export function resolveTarget(db, target) {
-  if (!target) throw new Error("send: --to <name|agent_id> is required");
+// with the candidates so the caller can disambiguate. `cmd` is the invoking
+// command name so error prefixes match what the user actually ran (send is
+// only one of several callers: doorbell, reply, ...).
+export function resolveTarget(db, target, cmd = "send") {
+  if (!target) throw new Error(`${cmd}: --to <name|agent_id> is required`);
   const byId = db.prepare("SELECT agent_id FROM agents WHERE agent_id = ?").get(target);
   if (byId) return byId.agent_id;
   const byName = db
@@ -43,10 +61,10 @@ export function resolveTarget(db, target) {
     .all(target);
   if (byName.length === 1) return byName[0].agent_id;
   if (byName.length === 0) {
-    throw new Error(`send: no live agent named '${target}' (and no agent_id matches)`);
+    throw new Error(`${cmd}: no live agent named '${target}' (and no agent_id matches)`);
   }
   const list = byName.map((a) => `${a.agent_id} (${a.session_name}:${a.pane})`).join(", ");
-  throw new Error(`send: ambiguous target '${target}' -> ${list}; address by agent_id`);
+  throw new Error(`${cmd}: ambiguous target '${target}' -> ${list}; address by agent_id`);
 }
 
 // Body comes from --body, or stdin when --body is omitted (so callers can pipe).
@@ -68,8 +86,8 @@ export function send(opts) {
   }
   const db = openDb({ create: true });
   try {
-    const from_agent = selfId(db, opts.from);
-    const to_agent = resolveTarget(db, opts.to);
+    const from_agent = selfId(db, selfFlag(opts));
+    const to_agent = resolveTarget(db, opts.to, opts.cmd ?? "send");
     // Sweep-on-send: verify the target is still alive so we never queue mail to
     // a corpse and never report a dead agent as a live target. --no-verify skips.
     if (!opts["no-verify"]) {
@@ -86,7 +104,7 @@ export function send(opts) {
       kind,
       subject: opts.subject ?? null,
       body: resolveBody(opts),
-      reply_to: opts["reply-to"] != null ? Number(opts["reply-to"]) : null,
+      reply_to: opts["reply-to"] != null ? toInt(opts["reply-to"], "send: --reply-to") : null,
       status: "new",
       claimed_at: null,
     };
@@ -112,20 +130,21 @@ export function send(opts) {
 // reply_to = the original id. Resolves correlation without the caller having to
 // know who sent it. --doorbell rings the recipient.
 export function reply(opts) {
-  const srcId = opts["to-msg"];
-  if (srcId == null) throw new Error("reply: --to-msg <id> is required");
+  if (opts["to-msg"] == null) throw new Error("reply: --to-msg <id> is required");
+  const srcId = toInt(opts["to-msg"], "reply: --to-msg");
   const db = openDb();
   let orig;
   try {
-    orig = db.prepare("SELECT id, from_agent FROM messages WHERE id = ?").get(Number(srcId));
+    orig = db.prepare("SELECT id, from_agent FROM messages WHERE id = ?").get(srcId);
   } finally {
     db.close();
   }
   if (!orig) throw new Error(`reply: no message #${srcId}`);
   if (!orig.from_agent) throw new Error(`reply: message #${srcId} has no sender to reply to`);
   return send({
+    cmd: "reply",
     to: orig.from_agent,
-    from: opts.from,
+    me: selfFlag(opts),
     kind: "reply",
     subject: opts.subject,
     body: opts.body,
@@ -140,11 +159,23 @@ export function inbox(opts = {}) {
   const status = opts.status ?? "new";
   const db = openDb();
   try {
-    const me = selfId(db, opts.me);
+    const me = selfId(db, selfFlag(opts));
     if (!me) throw new Error("inbox: no identity ($BUS_AGENT_ID / $TMUX_PANE unset, no --me)");
     return db
       .prepare("SELECT * FROM messages WHERE to_agent = ? AND status = ? ORDER BY id")
       .all(me, status);
+  } finally {
+    db.close();
+  }
+}
+
+// Read a single message by id (read-only; no claim/ack). Returns the row or null.
+export function show(opts = {}) {
+  if (opts.id == null) throw new Error("show: --id <id> is required");
+  const id = toInt(opts.id, "show: --id");
+  const db = openDb();
+  try {
+    return db.prepare("SELECT * FROM messages WHERE id = ?").get(id) ?? null;
   } finally {
     db.close();
   }
@@ -158,7 +189,7 @@ export function doorbell(opts) {
   const db = openDb();
   let agent;
   try {
-    const id = resolveTarget(db, me);
+    const id = resolveTarget(db, me, "doorbell");
     agent = db.prepare("SELECT agent_id, pid FROM agents WHERE agent_id = ?").get(id);
   } finally {
     db.close();
@@ -178,12 +209,19 @@ const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 export function prune(opts = {}) {
   const maxAge = opts["max-age-ms"] != null ? Number(opts["max-age-ms"]) : DEFAULT_MAX_AGE_MS;
   const cutoff = now() - maxAge;
+  const dryRun = !!opts["dry-run"];
+  // Single predicate shared by the preview (SELECT) and the mutation (DELETE),
+  // so a retention-rule change can't make --dry-run lie.
+  const WHERE = "status IN ('done','failed') AND ts < ?";
   const db = openDb({ create: true });
   try {
+    // --dry-run: report what WOULD be deleted (count + ids) without mutating.
+    if (dryRun) {
+      const rows = db.prepare(`SELECT id FROM messages WHERE ${WHERE}`).all(cutoff);
+      return { dryRun: true, deleted: rows.length, ids: rows.map((r) => r.id), cutoff };
+    }
     const deleted = db
-      .prepare(
-        "DELETE FROM messages WHERE status IN ('done','failed') AND ts < ? RETURNING id",
-      )
+      .prepare(`DELETE FROM messages WHERE ${WHERE} RETURNING id`)
       .all(cutoff);
     db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
     return { deleted: deleted.length, cutoff };
@@ -198,7 +236,7 @@ export function prune(opts = {}) {
 export function claim(opts) {
   const db = openDb({ create: true });
   try {
-    const me = selfId(db, opts.me);
+    const me = selfId(db, selfFlag(opts));
     if (!me) throw new Error("claim: no identity ($BUS_AGENT_ID / $TMUX_PANE unset, no --me)");
     return db
       .prepare(
@@ -218,7 +256,7 @@ export function ack(opts) {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean)
-    .map(Number);
+    .map((s) => toInt(s, "ack: --ids"));
   if (ids.length === 0) throw new Error("ack: --ids <id,...> is required");
   const status = opts.fail ? "failed" : "done";
   const db = openDb({ create: true });

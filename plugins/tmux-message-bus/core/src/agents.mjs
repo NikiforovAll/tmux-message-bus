@@ -1,6 +1,7 @@
 // Registry operations on the `agents` table (agent-agnostic).
 import { openDb } from "./db.mjs";
 import { tmuxContext, agentAlive } from "./identity.mjs";
+import { selfFlag } from "./messages.mjs";
 
 // Claimed messages older than this are presumed orphaned by a crashed drain
 // and requeued. Long enough to never race a live claim->ack (same hook).
@@ -15,9 +16,9 @@ function now() {
 // status is reset to 'live'. Called from the adapter's SessionStart and on each
 // drain as a cheap liveness touch.
 export function register(opts) {
-  const agent_id = opts.id || process.env.BUS_AGENT_ID;
+  const agent_id = selfFlag(opts) || process.env.BUS_AGENT_ID;
   if (!agent_id) {
-    throw new Error("register: BUS_AGENT_ID is unset and no --id given");
+    throw new Error("register: BUS_AGENT_ID is unset and no --me given");
   }
   const ctx = tmuxContext() || {};
   const pid = opts.pid != null ? Number(opts.pid) : ctx.pid ?? null;
@@ -81,6 +82,7 @@ export function list(opts = {}) {
 // crashed drain (claimed too long ago). Idempotent; safe to run often.
 export function sweep(opts = {}) {
   const staleMs = opts["stale-ms"] != null ? Number(opts["stale-ms"]) : STALE_CLAIM_MS;
+  const dryRun = !!opts["dry-run"];
   const db = openDb({ create: true });
   try {
     const live = db.prepare("SELECT agent_id, pid FROM agents WHERE status = 'live'").all();
@@ -88,15 +90,22 @@ export function sweep(opts = {}) {
     for (const a of live) {
       if (!agentAlive(a.pid)) dead.push(a.agent_id);
     }
+    const cutoff = now() - staleMs;
+
+    // Single predicate shared by the preview (SELECT) and the requeue (UPDATE).
+    const ORPHANED = "status = 'claimed' AND claimed_at < ?";
+
+    // --dry-run: report what WOULD change (counts + ids) without mutating.
+    if (dryRun) {
+      const requeued = db.prepare(`SELECT id FROM messages WHERE ${ORPHANED}`).all(cutoff);
+      return { dryRun: true, dead, requeued: requeued.map((r) => r.id) };
+    }
+
     const markDead = db.prepare("UPDATE agents SET status = 'dead' WHERE agent_id = ?");
     for (const id of dead) markDead.run(id);
 
-    const cutoff = now() - staleMs;
     const requeued = db
-      .prepare(
-        "UPDATE messages SET status = 'new', claimed_at = NULL " +
-          "WHERE status = 'claimed' AND claimed_at < ? RETURNING id",
-      )
+      .prepare(`UPDATE messages SET status = 'new', claimed_at = NULL WHERE ${ORPHANED} RETURNING id`)
       .all(cutoff);
 
     return { dead, requeued: requeued.map((r) => r.id) };
