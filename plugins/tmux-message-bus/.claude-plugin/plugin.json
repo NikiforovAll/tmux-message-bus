@@ -1,0 +1,13 @@
+{
+  "name": "tmux-message-bus",
+  "version": "0.0.1",
+  "description": "Claude Code adapter for tmux-message-bus: durable cross-window/session messaging. SessionStart register hook + Stop-hook drain (decision:block injection) + send-keys doorbell, on top of the agent-agnostic core bus.",
+  "author": {
+    "name": "Oleksii Nikiforov",
+    "email": "alexey.nikiforovall@gmail.com"
+  },
+  "homepage": "https://github.com/nikiforovall/tmux-message-bus#readme",
+  "repository": "https://github.com/nikiforovall/tmux-message-bus.git",
+  "license": "MIT",
+  "keywords": ["tmux", "message-bus", "claude", "messaging", "cross-session"]
+}

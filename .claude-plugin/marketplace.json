@@ -1,0 +1,13 @@
+{
+  "name": "tmux-message-bus",
+  "owner": {
+    "name": "NikiforovAll"
+  },
+  "plugins": [
+    {
+      "name": "tmux-message-bus",
+      "source": "./plugins/tmux-message-bus",
+      "description": "Claude Code adapter for the tmux-message-bus: durable cross-window/session messaging via a SessionStart register hook and a Stop-hook drain. Builds on the agent-agnostic `core/` bus."
+    }
+  ]
+}

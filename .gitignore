@@ -1,0 +1,11 @@
+# local bus state
+bus.db
+bus.db-wal
+bus.db-shm
+*.db
+*.db-wal
+*.db-shm
+
+# os / editor
+.DS_Store
+Thumbs.db
