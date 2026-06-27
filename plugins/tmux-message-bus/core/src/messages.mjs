@@ -14,14 +14,15 @@ function now() {
   return Date.now();
 }
 
-// Coerce a flag value to an integer, rejecting non-numeric input instead
-// of letting Number() yield a silent NaN that corrupts the query downstream.
+// Coerce a flag value to an integer, rejecting non-numeric input instead of
+// letting Number() yield a silent NaN that corrupts the query downstream. Only
+// plain decimal digits (optional sign) are accepted -- Number() would otherwise
+// quietly take hex ('0x10') and exponent ('1e3') forms a caller never intended.
 function toInt(value, label) {
-  const n = Number(value);
-  if (!Number.isInteger(n)) {
+  if (!/^[+-]?\d+$/.test(String(value).trim())) {
     throw new Error(`${label}: '${value}' is not a valid integer`);
   }
-  return n;
+  return Number(value);
 }
 
 // Resolve the CALLING agent's own agent_id. Prefer an explicit value, then
@@ -47,29 +48,174 @@ export function selfId(db, explicit) {
   return null;
 }
 
-// Resolve a --to target to a single live agent_id.
-// Exact agent_id wins; otherwise match live agents by name. Ambiguous -> throw
-// with the candidates so the caller can disambiguate. `cmd` is the invoking
-// command name so error prefixes match what the user actually ran (send is
-// only one of several callers: doorbell, reply, ...).
-export function resolveTarget(db, target, cmd = "send") {
-  if (!target) throw new Error(`${cmd}: --to <name|agent_id> is required`);
+// Non-negative integer if the string is a plain decimal index, else null (for
+// window-index match). Strict digits-only: Number() would otherwise accept hex
+// ('0x10' -> 16) and exponent ('1e3' -> 1000) as if they were window indices.
+function asIndex(s) {
+  const t = String(s).trim();
+  return /^\d+$/.test(t) ? Number(t) : null;
+}
+
+// The caller's own tmux session, used to scope bare lookups. Null when the
+// caller has no resolvable identity/session (e.g. a non-tmux shell).
+export function callerSession(db, explicit) {
+  const id = selfId(db, explicit);
+  if (!id) return null;
+  return db.prepare("SELECT session_name FROM agents WHERE agent_id = ?").get(id)?.session_name ?? null;
+}
+
+// A tmux pane hosts one foreground process, so multiple LIVE rows on a single
+// pane are stale registrations from sessions that restarted there (their shared
+// pane_pid defeats the pid-based sweep). Collapse same-pane candidates to the
+// newest by started_at -- the real occupant -- so resolution succeeds instead
+// of crying ambiguous on such corpses. NULL-pane rows (non-tmux) never collapse.
+function collapsePane(rows) {
+  const newest = new Map(); // pane -> newest row
+  const out = [];
+  for (const r of rows) {
+    if (r.pane == null) {
+      out.push(r);
+      continue;
+    }
+    const cur = newest.get(r.pane);
+    if (!cur || (r.started_at ?? 0) > (cur.started_at ?? 0)) newest.set(r.pane, r);
+  }
+  return out.concat([...newest.values()]);
+}
+
+// Sweep-on-insert: enforce one-live-per-pane for a single pane by marking all
+// but the newest live row dead. Heals dbs dirtied before register-time eviction
+// existed, on the send path. No-op for NULL pane or a pane with <=1 live row.
+function evictPaneDuplicates(db, pane) {
+  if (pane == null) return;
+  db.prepare(
+    `UPDATE agents SET status = 'dead' WHERE pane = ? AND status = 'live' AND agent_id != (
+       SELECT agent_id FROM agents WHERE pane = ? AND status = 'live'
+       ORDER BY started_at DESC LIMIT 1)`,
+  ).run(pane, pane);
+}
+
+// Resolve a --to target to a single live agent_id. Exact agent_id always wins
+// (global). Otherwise try, against LIVE agents: a tmux-style `session:window`
+// qualifier (cross-session; window = name or index), then bare name, then
+// window_name, then window index. Bare lookups are scoped to the caller's own
+// session (`sessionName`) -- a window name/index means *your* window, never a
+// peer's in another session; reach across sessions with `session:window` or the
+// agent_id. The first tier that matches decides: one hit resolves, more throws
+// with candidates. `cmd` is the invoking command so error prefixes match it.
+export function resolveTarget(db, target, cmd = "send", sessionName = null) {
+  if (!target) throw new Error(`${cmd}: --to <name|agent_id|window> is required`);
+
   const byId = db.prepare("SELECT agent_id FROM agents WHERE agent_id = ?").get(target);
   if (byId) return byId.agent_id;
-  const byName = db
-    .prepare("SELECT agent_id, name, pane, session_name FROM agents WHERE name = ? AND status = 'live'")
-    .all(target);
-  if (byName.length === 1) return byName[0].agent_id;
-  if (byName.length === 0) {
-    throw new Error(`${cmd}: no live agent named '${target}' (and no agent_id matches)`);
+
+  const COLS = "agent_id, name, window, window_name, session_name, pane, started_at";
+  const tiers = [];
+
+  // session:window -> mirrors tmux `-t`; window part is a name or an index.
+  // Works with or without a caller session: the session is named explicitly.
+  const colon = target.indexOf(":");
+  if (colon !== -1) {
+    const sess = target.slice(0, colon);
+    const win = target.slice(colon + 1);
+    tiers.push(() =>
+      db
+        .prepare(
+          `SELECT ${COLS} FROM agents WHERE status = 'live' AND session_name = ? ` +
+            "AND (window_name = ? OR window = ?)",
+        )
+        .all(sess, win, asIndex(win)),
+    );
+  } else if (!sessionName) {
+    // Bare target, but the caller has no resolvable session to scope to. Refuse
+    // rather than resolve GLOBALLY -- that would invert the in-session-only rule
+    // and silently reach a peer in some other session. Force an explicit address.
+    throw new Error(
+      `${cmd}: cannot resolve bare target '${target}' without a caller session ` +
+        "(bare name/window/index are scoped to your session); use an agent_id or session:window",
+    );
   }
-  const list = byName.map((a) => `${a.agent_id} (${a.session_name}:${a.pane})`).join(", ");
-  throw new Error(`${cmd}: ambiguous target '${target}' -> ${list}; address by agent_id`);
+
+  // Bare name/window-name/index: scoped to the caller's session. Only run when a
+  // session is known -- the no-session case is rejected above. Tiers are lazy
+  // thunks so an earlier match short-circuits the later queries.
+  if (sessionName) {
+    tiers.push(() =>
+      db
+        .prepare(`SELECT ${COLS} FROM agents WHERE status = 'live' AND name = ? AND session_name = ?`)
+        .all(target, sessionName),
+    );
+    tiers.push(() =>
+      db
+        .prepare(`SELECT ${COLS} FROM agents WHERE status = 'live' AND window_name = ? AND session_name = ?`)
+        .all(target, sessionName),
+    );
+    const idx = asIndex(target);
+    if (idx !== null) {
+      tiers.push(() =>
+        db
+          .prepare(`SELECT ${COLS} FROM agents WHERE status = 'live' AND window = ? AND session_name = ?`)
+          .all(idx, sessionName),
+      );
+    }
+  }
+
+  for (const run of tiers) {
+    const cand = collapsePane(run());
+    if (cand.length === 1) return cand[0].agent_id;
+    if (cand.length > 1) {
+      const list = cand
+        .map((a) => `${a.agent_id} (${a.session_name}:${a.window_name ?? a.window}/${a.pane})`)
+        .join(", ");
+      throw new Error(`${cmd}: ambiguous target '${target}' -> ${list}; address by agent_id or session:window`);
+    }
+  }
+  const where = sessionName ? ` in session '${sessionName}'` : "";
+  throw new Error(
+    `${cmd}: no live agent matching '${target}'${where} (bare name/window/index resolve within your session; use session:window or agent_id to cross sessions)`,
+  );
+}
+
+// Read a --envelope: a JSON object holding the message fields, from a file path
+// or '-' for stdin. Avoids long/special-char CLI args that Git Bash mangles.
+// Explicit CLI flags override envelope fields; snake_case envelope keys are
+// normalized to the CLI's kebab-case flag names. No-op when --envelope absent.
+function applyEnvelope(opts) {
+  if (opts.envelope == null || opts.envelope === true) return opts;
+  const src = String(opts.envelope);
+  let raw;
+  try {
+    raw = readFileSync(src === "-" ? 0 : src, "utf8");
+  } catch (e) {
+    throw new Error(`envelope: cannot read ${src === "-" ? "stdin" : `'${src}'`}: ${e.message}`);
+  }
+  let env;
+  try {
+    env = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`envelope: invalid JSON: ${e.message}`);
+  }
+  if (env === null || typeof env !== "object" || Array.isArray(env)) {
+    throw new Error("envelope: expected a JSON object");
+  }
+  if ("reply_to" in env && !("reply-to" in env)) env["reply-to"] = env.reply_to;
+  if ("no_verify" in env && !("no-verify" in env)) env["no-verify"] = env.no_verify;
+  const merged = { ...env, ...opts }; // CLI flags win over envelope
+  delete merged.envelope;
+  delete merged.reply_to;
+  delete merged.no_verify;
+  // `--envelope -` has already consumed stdin; mark it so the body fallback
+  // below doesn't re-read fd 0 (which is now at EOF) and treat that as no body.
+  if (src === "-") merged._stdinConsumed = true;
+  return merged;
 }
 
 // Body comes from --body, or stdin when --body is omitted (so callers can pipe).
+// When `--envelope -` already drained stdin, the body must come from the
+// envelope's "body" field (or --body); don't re-read the now-empty fd 0.
 function resolveBody(opts) {
   if (opts.body != null && opts.body !== true) return String(opts.body);
+  if (opts._stdinConsumed) return null;
   try {
     const s = readFileSync(0, "utf8");
     return s.length ? s : null;
@@ -80,6 +226,7 @@ function resolveBody(opts) {
 
 // INSERT a durable message (status='new'). Returns the new row.
 export function send(opts) {
+  opts = applyEnvelope(opts);
   const kind = opts.kind ?? "notify";
   if (!KINDS.has(kind)) {
     throw new Error(`send: invalid kind '${kind}' (notify|request|reply|delegate)`);
@@ -87,7 +234,15 @@ export function send(opts) {
   const db = openDb({ create: true });
   try {
     const from_agent = selfId(db, selfFlag(opts));
-    const to_agent = resolveTarget(db, opts.to, opts.cmd ?? "send");
+    // Scope bare-target resolution to the sender's own session. Derive it from
+    // from_agent's row rather than re-running selfId via callerSession.
+    const sessionName = from_agent
+      ? (db.prepare("SELECT session_name FROM agents WHERE agent_id = ?").get(from_agent)?.session_name ?? null)
+      : null;
+    const to_agent = resolveTarget(db, opts.to, opts.cmd ?? "send", sessionName);
+    // Sweep-on-insert: heal stale same-pane duplicates on the target's pane so
+    // the registry reflects one live agent per pane (newest wins).
+    evictPaneDuplicates(db, db.prepare("SELECT pane FROM agents WHERE agent_id = ?").get(to_agent)?.pane);
     // Sweep-on-send: verify the target is still alive so we never queue mail to
     // a corpse and never report a dead agent as a live target. --no-verify skips.
     if (!opts["no-verify"]) {
@@ -130,6 +285,7 @@ export function send(opts) {
 // reply_to = the original id. Resolves correlation without the caller having to
 // know who sent it. --doorbell rings the recipient.
 export function reply(opts) {
+  opts = applyEnvelope(opts); // body/subject from envelope; `to` is ignored (target = sender)
   if (opts["to-msg"] == null) throw new Error("reply: --to-msg <id> is required");
   const srcId = toInt(opts["to-msg"], "reply: --to-msg");
   const db = openDb();
@@ -151,6 +307,7 @@ export function reply(opts) {
     "reply-to": orig.id,
     doorbell: opts.doorbell,
     "no-verify": opts["no-verify"],
+    _stdinConsumed: opts._stdinConsumed,
   });
 }
 
@@ -189,7 +346,7 @@ export function doorbell(opts) {
   const db = openDb();
   let agent;
   try {
-    const id = resolveTarget(db, me, "doorbell");
+    const id = resolveTarget(db, me, "doorbell", callerSession(db, opts.me ?? opts.from ?? opts.id));
     agent = db.prepare("SELECT agent_id, pid FROM agents WHERE agent_id = ?").get(id);
   } finally {
     db.close();

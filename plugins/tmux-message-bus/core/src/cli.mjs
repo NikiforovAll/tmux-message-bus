@@ -18,7 +18,8 @@ Commands:
                          --pid <pid>         override pid anchor (default: tmux pane_pid)
                          --cwd <path>        override cwd
   send --to <t> [opts] Durable INSERT of a message to a live agent.
-                         --to <name|agent_id>   target (required)
+                         --to <target>          target (required); resolved as
+                           agent_id > session:window > name > window-name > window-index
                          --me <agent_id>        sender (default: $BUS_AGENT_ID; alias --from)
                          --kind <k>             notify|request|reply|delegate
                          --subject <s>          subject line
@@ -26,8 +27,12 @@ Commands:
                          --reply-to <id>        correlate a reply to a request
                          --doorbell             ring the target after insert
                          --no-verify            skip target-liveness check
+                         --envelope <path|->    read all fields from a JSON object
+                           (file, or - for stdin); CLI flags override its keys.
+                           Avoids Git Bash mangling long/special-char args.
   reply --to-msg <id>  Reply to a message (targets its sender, sets reply_to).
-                         [--body .. | stdin] [--subject ..] [--doorbell] [--no-verify]
+                         [--body .. | stdin] [--subject ..] [--doorbell]
+                         [--no-verify] [--envelope <path|->]
   inbox [--me <id>] [--status S]  Peek at mail without claiming (read-only).
                          --status new|claimed|done|failed  (default: new)
   show <id> (alias get) Read a single message by id (read-only, no claim/ack).

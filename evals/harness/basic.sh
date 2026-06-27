@@ -11,14 +11,14 @@ H="$CLAUDE_PLUGIN_ROOT/hooks"
 WORK="$(mktemp -d)"
 export BUS_DB="$WORK/bus.db"
 BUS() { node "$BUS_BIN" "$@"; }
-J() { node -e 'const fs=require("fs");const d=JSON.parse(fs.readFileSync(0));const v=eval(process.argv[1]);process.stdout.write(v==null?"":String(v))' "$1"; }
+J() { node -e 'const fs=require("fs");const s=fs.readFileSync(0,"utf8");if(s.trim()){const d=JSON.parse(s);const v=eval(process.argv[1]);process.stdout.write(v==null?"":String(v))}' "$1"; }
 
 PASS=0; FAIL=0
 ok()   { echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 chk()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want=$3 got=$2)"; fi; }
 
-cleanup() { tmux kill-session -t evalA 2>/dev/null; tmux kill-session -t evalB 2>/dev/null; rm -rf "$WORK"; }
+cleanup() { tmux kill-session -t evalA 2>/dev/null; tmux kill-session -t evalB 2>/dev/null; tmux kill-session -t evalC 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 
 echo "== bus transport eval =="
@@ -135,6 +135,73 @@ H_OUT=$(printf '{"session_id":"evA","reason":"clear","hook_event_name":"SessionE
 chk "T14b session-end clear no-ops cleanly" "$H_OUT" "exit=0"
 H_OUT2=$(printf '{"session_id":"evA","reason":"other","hook_event_name":"SessionEnd"}' | BUS_BIN="$BUS_BIN" bash "$H/session-end.sh"; echo "exit=$?")
 chk "T14b session-end other runs gc cleanly" "$H_OUT2" "exit=0"
+
+# --- T15..T17 use one session (evalC) with a sender + a receiver window, so
+#     bare name/window/index resolution is exercised WITHIN the caller's session.
+read PANE_CS PP_CS <<< "$(tmux new-session -d -s evalC -n sender -P -F '#{pane_id} #{pane_pid}' 'cat')"
+tmux set-window-option -t evalC: automatic-rename off 2>/dev/null
+RW=$(tmux new-window -t evalC -n bushopper -P -F '#{window_index}' 'cat')
+tmux set-window-option -t "evalC:$RW" automatic-rename off 2>/dev/null
+read PANE_CR PP_CR <<< "$(tmux list-panes -t "evalC:$RW" -F '#{pane_id} #{pane_pid}')"
+SS() { CLAUDE_PROJECT_DIR="$REPO" TMUX_PANE="$1" BUS_BIN="$BUS_BIN" \
+  bash -c 'printf "{\"session_id\":\"'"$2"'\",\"source\":\"startup\"}" | bash "'"$H"'/session-start.sh"' >/dev/null; }
+SS "$PANE_CS" evCS   # claude-evCS  (sender, window 'sender')
+SS "$PANE_CR" evCR   # claude-evCR  (receiver, window 'bushopper')
+
+# --- T15 address a same-session peer by tmux window name ---
+WN=$(BUS list | J 'd.agents.find(a=>a.agent_id=="claude-evCR").window_name')
+chk "T15 register captures window_name" "$WN" "bushopper"
+TOID=$(BUS_AGENT_ID="claude-evCS" BUS send --to bushopper --kind notify --body "by-wname" | J 'd.message.to_agent')
+chk "T15 send resolves by window name (in session)" "$TOID" "claude-evCR"
+
+# --- T16 session:window (name + index); bare index in-session; cross-session rules ---
+T16A=$(BUS_AGENT_ID="claude-evCS" BUS send --to "evalC:bushopper" --kind notify --body x | J 'd.message.to_agent')
+chk "T16 resolves session:window-name" "$T16A" "claude-evCR"
+T16B=$(BUS_AGENT_ID="claude-evCS" BUS send --to "evalC:$RW" --kind notify --body x | J 'd.message.to_agent')
+chk "T16 resolves session:window-index" "$T16B" "claude-evCR"
+T16C=$(BUS_AGENT_ID="claude-evCS" BUS send --to "$RW" --kind notify --body x | J 'd.message.to_agent')
+chk "T16 resolves bare window-index (in session)" "$T16C" "claude-evCR"
+# bare name does NOT cross sessions: from evalA, 'bushopper' (in evalC) must fail
+T16D=$(BUS_AGENT_ID="claude-evA" BUS send --to bushopper --kind notify --body x 2>&1; echo "rc=$?")
+echo "$T16D" | grep -q 'rc=1' && ok "T16 bare name does not cross sessions" || bad "T16 cross-session leak ($T16D)"
+# ...but session:window does cross sessions explicitly
+T16E=$(BUS_AGENT_ID="claude-evA" BUS send --to "evalC:bushopper" --kind notify --body x | J 'd.message.to_agent')
+chk "T16 session:window crosses sessions" "$T16E" "claude-evCR"
+
+# --- T17 envelope send: file + stdin, CLI flag override, body integrity ---
+printf '%s' '{"to":"bushopper","kind":"request","subject":"env-file","body":"line1\nline2 $weird `bt`"}' > "$WORK/env.json"
+EID=$(BUS_AGENT_ID="claude-evCS" BUS send --envelope "$WORK/env.json" | J 'd.message.id')
+EBODY=$(BUS show "$EID" | J 'd.message.body')
+chk "T17 envelope(file) preserves multi-line body" "$EBODY" "$(printf 'line1\nline2 $weird `bt`')"
+ETO=$(BUS show "$EID" | J 'd.message.to_agent')
+chk "T17 envelope(file) resolves --to" "$ETO" "claude-evCR"
+SID2=$(printf '%s' '{"to":"bushopper","kind":"notify","body":"via-stdin"}' | BUS_AGENT_ID="claude-evCS" BUS send --envelope - --kind request | J 'd.message.id')
+SKIND=$(BUS show "$SID2" | J 'd.message.kind')
+chk "T17 envelope(stdin) + CLI flag override" "$SKIND" "request"
+
+# --- T18 injected frame carries reply/envelope hint ---
+FRAMED=$(BUS claim --me claude-evCR | node "$H/format-inject.mjs" stop /dev/null | J 'd.reason')
+echo "$FRAMED" | grep -q 'bus reply --to-msg' && ok "T18 frame includes reply hint" || bad "T18 frame missing reply hint"
+echo "$FRAMED" | grep -q -- '--envelope' && ok "T18 frame nudges envelope" || bad "T18 frame missing envelope nudge"
+
+# --- T19 one-live-per-pane: register eviction + sweep-on-insert collapse ---
+# A session restart reuses the pane (new agent_id); the prior occupant's row must
+# not linger 'live' -- its pane_pid is still alive, so the pid-sweep can't tell.
+SS "$PANE_CS" evCS2   # second session restarts in the sender's pane
+chk "T19 register evicts prior pane occupant" \
+  "$(BUS list --all | J 'd.agents.find(a=>a.agent_id=="claude-evCS").status')" "dead"
+chk "T19 one live agent on reused pane" \
+  "$(BUS list | J 'd.agents.filter(a=>a.pane=="'"$PANE_CS"'").length')" "1"
+# Simulate a legacy-dirty db (two live rows on one pane, from pre-eviction code):
+node --input-type=module -e 'import{DatabaseSync}from"node:sqlite";new DatabaseSync(process.env.BUS_DB).prepare("UPDATE agents SET status=? WHERE agent_id=?").run("live","claude-evCS")'
+chk "T19 dirty db has two live on pane" \
+  "$(BUS list | J 'd.agents.filter(a=>a.pane=="'"$PANE_CS"'").length')" "2"
+# bare window-name target collapses same-pane dupes -> resolves to newest (no ambiguity)
+RT=$(BUS_AGENT_ID="claude-evCR" BUS send --to sender --kind notify --body x | J 'd.message.to_agent')
+chk "T19 collapses same-pane dupes to newest" "$RT" "claude-evCS2"
+# ...and the send healed the registry back to one live on that pane
+chk "T19 sweep-on-insert heals pane to one live" \
+  "$(BUS list | J 'd.agents.filter(a=>a.pane=="'"$PANE_CS"'").length')" "1"
 
 echo ""
 echo "== $PASS passed, $FAIL failed =="

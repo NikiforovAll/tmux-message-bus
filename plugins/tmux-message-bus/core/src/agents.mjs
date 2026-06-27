@@ -31,6 +31,7 @@ export function register(opts) {
     pid,
     pane: ctx.pane ?? null,
     window: ctx.window ?? null,
+    window_name: ctx.window_name ?? null,
     session_name: ctx.session_name ?? null,
     cwd: opts.cwd ?? ctx.cwd ?? process.cwd(),
     started_at: t,
@@ -42,10 +43,10 @@ export function register(opts) {
   try {
     db.prepare(
       `INSERT INTO agents
-         (agent_id, agent_kind, instance_id, name, pid, pane, window,
+         (agent_id, agent_kind, instance_id, name, pid, pane, window, window_name,
           session_name, cwd, started_at, last_seen, status)
        VALUES
-         (:agent_id, :agent_kind, :instance_id, :name, :pid, :pane, :window,
+         (:agent_id, :agent_kind, :instance_id, :name, :pid, :pane, :window, :window_name,
           :session_name, :cwd, :started_at, :last_seen, :status)
        ON CONFLICT(agent_id) DO UPDATE SET
          agent_kind   = excluded.agent_kind,
@@ -54,11 +55,23 @@ export function register(opts) {
          pid          = excluded.pid,
          pane         = excluded.pane,
          window       = excluded.window,
+         window_name  = excluded.window_name,
          session_name = excluded.session_name,
          cwd          = excluded.cwd,
          last_seen    = excluded.last_seen,
          status       = 'live'`,
     ).run(row);
+    // One live agent per pane. A session restart in the same pane gets a fresh
+    // agent_id (new row) while the prior occupant's row stays 'live' -- its
+    // pane_pid (the pane's shell) is still alive, so the pid-based sweep can't
+    // tell them apart, and bare/window targeting goes ambiguous. The newest
+    // registration owns the pane, so evict prior occupants here. Guard NULL pane
+    // so non-tmux agents (no pane) never collapse into one another.
+    if (row.pane != null) {
+      db.prepare(
+        "UPDATE agents SET status = 'dead' WHERE pane = ? AND agent_id != ? AND status = 'live'",
+      ).run(row.pane, agent_id);
+    }
     return db.prepare("SELECT * FROM agents WHERE agent_id = ?").get(agent_id);
   } finally {
     db.close();

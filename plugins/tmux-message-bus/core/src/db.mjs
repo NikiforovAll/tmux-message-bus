@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS agents (
   pid          INTEGER,
   pane         TEXT,
   window       INTEGER,
+  window_name  TEXT,
   session_name TEXT,
   cwd          TEXT,
   started_at   INTEGER,
@@ -59,6 +60,9 @@ export function openDb({ create = false } = {}) {
 }
 
 // `bus init` — create the DB (dir + file) and schema. Idempotent.
+// No migrations: bus.db is disposable coordination state. A schema change to
+// SCHEMA means deleting the old bus.db (next SessionStart recreates it); CREATE
+// TABLE IF NOT EXISTS will not retrofit columns onto a pre-existing table.
 export function initDb() {
   const db = openDb({ create: true });
   db.exec(SCHEMA);

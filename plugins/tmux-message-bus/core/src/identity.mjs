@@ -20,18 +20,20 @@ export function sendKeysSentinel(pane, sentinel) {
 export function tmuxContext(pane = process.env.TMUX_PANE) {
   if (!pane) return null;
   // Tab-separated so values (e.g. cwd with spaces) survive splitting.
-  const fmt = "#{pane_pid}\t#{window_index}\t#{session_name}\t#{pane_current_path}";
+  const fmt =
+    "#{pane_pid}\t#{window_index}\t#{window_name}\t#{session_name}\t#{pane_current_path}";
   let out;
   try {
     out = tmux(["display", "-t", pane, "-p", fmt]);
   } catch {
     return null;
   }
-  const [pid, window, session_name, cwd] = out.split("\t");
+  const [pid, window, window_name, session_name, cwd] = out.split("\t");
   return {
     pane,
     pid: Number(pid),
     window: Number(window),
+    window_name,
     session_name,
     cwd,
   };
