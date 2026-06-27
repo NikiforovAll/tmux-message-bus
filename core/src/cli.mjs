@@ -36,6 +36,8 @@ Commands:
   list [--all]         List live agents (--all includes dead).
   sweep [--stale-ms N] Mark dead agents (pid gone), requeue orphaned claims.
   prune [--max-age-ms N] Delete old done/failed messages, checkpoint WAL.
+  gc [opts]            sweep + prune in one process (for end-of-session cleanup).
+                         Accepts --stale-ms and --max-age-ms.
   help                 Show this help.
 
 DB path: ${dbPath()}  (override with $BUS_DB)
@@ -130,6 +132,12 @@ export async function main(argv) {
     case "prune": {
       const r = prune(flags);
       process.stdout.write(JSON.stringify({ ok: true, ...r }) + "\n");
+      return 0;
+    }
+    case "gc": {
+      const swept = sweep(flags);
+      const pruned = prune(flags);
+      process.stdout.write(JSON.stringify({ ok: true, swept, pruned }) + "\n");
       return 0;
     }
     case "help":

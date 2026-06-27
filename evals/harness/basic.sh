@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deterministic transport eval for the bus (cases T1..T12).
+# Deterministic transport eval for the bus (cases T1..T14b).
 # Self-contained: isolated DB, throwaway tmux sessions, real CLI + adapter hooks.
 # Prints PASS/FAIL per case; exits non-zero on any failure. Leaves no state.
 set -uo pipefail
@@ -117,6 +117,24 @@ BUS prune --max-age-ms 0 >/dev/null
 NEWCLAIMED=$(node --input-type=module -e 'import{DatabaseSync}from"node:sqlite";const db=new DatabaseSync(process.env.BUS_DB);console.log(db.prepare("SELECT count(*) c FROM messages WHERE status IN (?,?)").get("new","claimed").c)')
 AFTER=$(node --input-type=module -e 'import{DatabaseSync}from"node:sqlite";const db=new DatabaseSync(process.env.BUS_DB);console.log(db.prepare("SELECT count(*) c FROM messages").get().c)')
 [ "$AFTER" -le "$BEFORE" ] && ok "T11 prune deletes old done/failed" || bad "T11 prune (before=$BEFORE after=$AFTER)"
+
+# --- T14 gc = sweep + prune in one process (end-of-session cleanup) ---
+# Leave a terminal (done) message, then gc with zero retention: it must be gone
+# and gc must report both a swept and a pruned result.
+BUS_AGENT_ID="claude-evX" BUS send --to claude-evA --kind notify --body "gc-me" >/dev/null
+GCMID=$(BUS claim --me claude-evA | J 'd.messages[0].id')
+BUS ack --ids "$GCMID" >/dev/null
+GC=$(BUS gc --stale-ms 0 --max-age-ms 0)
+HASKEYS=$(printf '%s' "$GC" | J 'String("swept" in d && "pruned" in d)')
+GONE=$(node --input-type=module -e 'import{DatabaseSync}from"node:sqlite";const db=new DatabaseSync(process.env.BUS_DB);console.log(db.prepare("SELECT count(*) c FROM messages WHERE status IN (?,?)").get("done","failed").c)')
+chk "T14 gc reports swept + pruned" "$HASKEYS" "true"
+chk "T14 gc prunes terminal messages" "$GONE" "0"
+
+# --- T14b session-end hook: reason=clear no-ops, other reasons run gc ---
+H_OUT=$(printf '{"session_id":"evA","reason":"clear","hook_event_name":"SessionEnd"}' | BUS_BIN="$BUS_BIN" bash "$H/session-end.sh"; echo "exit=$?")
+chk "T14b session-end clear no-ops cleanly" "$H_OUT" "exit=0"
+H_OUT2=$(printf '{"session_id":"evA","reason":"other","hook_event_name":"SessionEnd"}' | BUS_BIN="$BUS_BIN" bash "$H/session-end.sh"; echo "exit=$?")
+chk "T14b session-end other runs gc cleanly" "$H_OUT2" "exit=0"
 
 echo ""
 echo "== $PASS passed, $FAIL failed =="

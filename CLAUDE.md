@@ -24,7 +24,21 @@ claude --plugin-dir C:/Users/nikiforovall/dev/tmux-message-bus/plugins/tmux-mess
 Two-instance live test: launch two tmux windows each with the `--plugin-dir` command above;
 full flow in `evals/scenarios/live-runbook.md`.
 
+## DB cleanup (SessionEnd)
+
+`bus.db` is kept bounded by a `SessionEnd` hook (`hooks/session-end.sh`) that runs
+`bus gc` (= `sweep` + `prune` in one process; 10s per-hook timeout, since the
+default SessionEnd budget is 1.5s). It no-ops on `reason=clear` (pure context
+reset, not a teardown) and never blocks termination. SessionEnd does NOT fire on
+crash/kill — the next session's `SessionStart` sweep is the safety net.
+
+Resilient to session renames + pane moves: liveness is keyed on `pane_pid`
+presence in `tmux list-panes -a`, and identity on `agent_id` (= `claude-<session_id>`)
+— neither changes when a session is renamed or a pane is moved to another
+window/session (only the mutable `session_name`/`window`/`pane` columns refresh).
+So `gc` never falsely sweeps a renamed/moved-but-live agent. (Covered by T3 + T14.)
+
 ## Evals
 
-- `bash evals/harness/basic.sh` — deterministic transport eval (T1..T12), self-contained.
+- `bash evals/harness/basic.sh` — deterministic transport eval (T1..T14b), self-contained.
 - `evals/scenarios/` — patterns (P1..P4), behavioral prompts (B1..B6), live runbook.
