@@ -1,0 +1,14 @@
+{
+  "name": "tmux-message-bus-core",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Agent-agnostic durable message bus for agents in tmux (node:sqlite). The `bus` CLI.",
+  "type": "module",
+  "bin": {
+    "bus": "./bin/bus.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}
