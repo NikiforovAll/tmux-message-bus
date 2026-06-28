@@ -94,6 +94,20 @@ bus send --to <name> --body "build green?" --doorbell
 
 The receiver picks it up on its next turn — see [`docs/DESIGN.md`](docs/DESIGN.md) for the full architecture and the [`/bus`](plugins/tmux-message-bus/skills/bus) skill for the Claude-facing wrapper.
 
+### Install the `bus` CLI on your PATH
+
+Only needed to drive the bus manually from a terminal — the plugin's hooks resolve the
+CLI on their own. The core package declares a `bus` bin (Node ≥ 22):
+
+```bash
+cd plugins/tmux-message-bus/core
+npm link                              # symlink onto PATH (live edits apply); or: npm install -g .
+bus list                             # verify
+npm unlink -g tmux-message-bus-core  # undo
+```
+
+On Windows the shims land in `npm prefix -g` — ensure it's on PATH.
+
 ## Scope & caveats (it's an experiment)
 
 - **Single host only.** SQLite WAL is the transport — never put `bus.db` on a network share.
