@@ -1,8 +1,7 @@
 ---
 name: bus
-description: Send, list, and reply to messages across other agent instances in tmux windows/sessions via the durable message bus. Use to coordinate with a Claude session running in another tmux window or session.
+description: Coordinate with other Claude agent instances running in separate tmux windows or sessions on this host, over a durable message bus. Use to send a message, request, or delegate to a peer agent; list reachable agents; read your inbox; or reply (by #id) to a peer message you received. Reach for it whenever a task means messaging, handing work to, or answering another running agent or session.
 argument-hint: "<list|inbox|send|reply> [target] [message]"
-disable-model-invocation: true
 ---
 
 Arguments: $ARGUMENTS
