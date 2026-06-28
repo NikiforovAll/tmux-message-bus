@@ -1,7 +1,7 @@
 // Registry operations on the `agents` table (agent-agnostic).
 import { openDb } from "./db.mjs";
 import { tmuxContext, agentAlive } from "./identity.mjs";
-import { selfFlag } from "./messages.mjs";
+import { selfFlag, toInt } from "./messages.mjs";
 
 // Claimed messages older than this are presumed orphaned by a crashed drain
 // and requeued. Long enough to never race a live claim->ack (same hook).
@@ -21,7 +21,7 @@ export function register(opts) {
     throw new Error("register: BUS_AGENT_ID is unset and no --me given");
   }
   const ctx = tmuxContext() || {};
-  const pid = opts.pid != null ? Number(opts.pid) : ctx.pid ?? null;
+  const pid = opts.pid != null ? toInt(opts.pid, "register: --pid") : ctx.pid ?? null;
   const t = now();
   const row = {
     agent_id,
@@ -94,7 +94,7 @@ export function list(opts = {}) {
 // Mark agents dead whose pid is gone, and requeue messages orphaned by a
 // crashed drain (claimed too long ago). Idempotent; safe to run often.
 export function sweep(opts = {}) {
-  const staleMs = opts["stale-ms"] != null ? Number(opts["stale-ms"]) : STALE_CLAIM_MS;
+  const staleMs = opts["stale-ms"] != null ? toInt(opts["stale-ms"], "sweep: --stale-ms") : STALE_CLAIM_MS;
   const dryRun = !!opts["dry-run"];
   const db = openDb({ create: true });
   try {

@@ -68,6 +68,16 @@ function renderAgents(rows, flags) {
   }
 }
 
+// Terse confirmation for send/reply: the caller already knows the body it sent,
+// so echo only what it cannot derive -- the assigned id (for reply correlation),
+// the resolved target, kind, reply_to, and the best-effort doorbell result.
+function emitSent(row) {
+  const { id, from_agent, to_agent, kind, reply_to, _doorbell } = row;
+  process.stdout.write(
+    JSON.stringify({ ok: true, message: { id, from_agent, to_agent, kind, reply_to }, doorbell: _doorbell ?? null }) + "\n",
+  );
+}
+
 const USAGE = `bus — durable message bus for agents in tmux
 
 Usage: bus <command> [options]
@@ -187,13 +197,11 @@ export async function main(argv) {
       return 0;
     }
     case "send": {
-      const row = send(flags);
-      process.stdout.write(JSON.stringify({ ok: true, message: row }) + "\n");
+      emitSent(send(flags));
       return 0;
     }
     case "reply": {
-      const row = reply(flags);
-      process.stdout.write(JSON.stringify({ ok: true, message: row }) + "\n");
+      emitSent(reply(flags));
       return 0;
     }
     case "inbox": {

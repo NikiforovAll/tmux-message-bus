@@ -18,7 +18,7 @@ function now() {
 // letting Number() yield a silent NaN that corrupts the query downstream. Only
 // plain decimal digits (optional sign) are accepted -- Number() would otherwise
 // quietly take hex ('0x10') and exponent ('1e3') forms a caller never intended.
-function toInt(value, label) {
+export function toInt(value, label) {
   if (!/^[+-]?\d+$/.test(String(value).trim())) {
     throw new Error(`${label}: '${value}' is not a valid integer`);
   }
@@ -391,7 +391,7 @@ const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 // checkpoint the WAL so the file doesn't grow unbounded. Never touches
 // new/claimed mail. --max-age-ms 0 prunes all terminal rows.
 export function prune(opts = {}) {
-  const maxAge = opts["max-age-ms"] != null ? Number(opts["max-age-ms"]) : DEFAULT_MAX_AGE_MS;
+  const maxAge = opts["max-age-ms"] != null ? toInt(opts["max-age-ms"], "prune: --max-age-ms") : DEFAULT_MAX_AGE_MS;
   const cutoff = now() - maxAge;
   const dryRun = !!opts["dry-run"];
   // Single predicate shared by the preview (SELECT) and the mutation (DELETE),
