@@ -1,8 +1,72 @@
 // Command dispatch for the `bus` CLI. Agent-agnostic core.
 import { initDb, dbPath } from "./db.mjs";
 import { register, list, sweep } from "./agents.mjs";
-import { send, claim, drain, ack, doorbell, prune, reply, inbox, show, selfId, selfFlag } from "./messages.mjs";
+import { send, claim, drain, ack, doorbell, prune, reply, inbox, show, selfId, selfFlag, resolveTarget, callerSession, unreadBySender } from "./messages.mjs";
 import { openDb } from "./db.mjs";
+
+// Shortest `--to` token that actually resolves to this agent from the caller's
+// position: bare window-index/name when in the caller's session, else
+// session:window, else the unambiguous agent_id. Verified by round-tripping each
+// candidate through the real resolver, so a printed target is never wrong.
+function shortestTarget(db, a, mySession) {
+  const cands = [];
+  if (mySession && a.session_name === mySession) {
+    cands.push(String(a.window));
+    if (a.window_name) cands.push(a.window_name);
+  }
+  cands.push(`${a.session_name}:${a.window}`);
+  if (a.window_name) cands.push(`${a.session_name}:${a.window_name}`);
+  for (const t of cands) {
+    try {
+      if (resolveTarget(db, t, "list", mySession) === a.agent_id) return t;
+    } catch {
+      /* ambiguous/unresolved -> try the next, more-specific candidate */
+    }
+  }
+  return a.agent_id;
+}
+
+// Human view of `bus list`: agents grouped by tmux session (the caller's first),
+// each row showing how to reach it (--to hint) and unread mail it has waiting for
+// the caller. Machine callers pass --json for the flat row array instead.
+function renderAgents(rows, flags) {
+  if (!rows.length) return "No live agents.\n";
+  const db = openDb();
+  try {
+    const explicit = selfFlag(flags);
+    const self = selfId(db, explicit);
+    const mySession = callerSession(db, explicit); // authoritative, not derived from the row set
+    const unread = unreadBySender(db, self); // keyed by sender agent_id
+    const total = Object.values(unread).reduce((a, b) => a + b, 0);
+
+    const bySession = new Map();
+    for (const r of rows) {
+      if (!bySession.has(r.session_name)) bySession.set(r.session_name, []);
+      bySession.get(r.session_name).push(r);
+    }
+    const sessions = [...bySession.keys()].sort((a, b) =>
+      a === mySession ? -1 : b === mySession ? 1 : String(a).localeCompare(String(b)),
+    );
+
+    let out = "";
+    for (const sess of sessions) {
+      out += `${sess}\n`;
+      for (const a of bySession.get(sess).sort((x, y) => x.window - y.window)) {
+        const isSelf = a.agent_id === self;
+        const name = String(a.name ?? a.window_name ?? "");
+        const reach = isSelf ? "(you)" : `--to ${shortestTarget(db, a, mySession)}`;
+        const n = isSelf ? total : unread[a.agent_id] ?? 0;
+        const mail = n ? `  (${n} unread)` : "";
+        out += `  ${isSelf ? "*" : " "} ${("w" + a.window).padEnd(4)} ${name.padEnd(16)} ${reach}${mail}\n`;
+      }
+    }
+    if (!self)
+      out += `\nNo caller identity ($BUS_AGENT_ID / $TMUX_PANE) -- run from a tmux pane to mark "you" and tailor targets.\n`;
+    return out;
+  } finally {
+    db.close();
+  }
+}
 
 const USAGE = `bus — durable message bus for agents in tmux
 
@@ -45,7 +109,10 @@ Commands:
   whoami [--me <id>]   Print this caller's own agent_id ($BUS_AGENT_ID, else
                          self-located via $TMUX_PANE against the registry;
                          --me overrides both; --id/--from accepted as aliases).
-  list [--all]         List live agents (--all includes dead).
+  list [--all] [--json]
+                       Live agents grouped by session, with a --to hint and
+                         unread-for-you per row (--all includes dead). --json
+                         emits the flat row array for scripts.
   sweep [--stale-ms N] Mark dead agents (pid gone), requeue orphaned claims.
                          --dry-run reports dead+requeued ids without mutating.
   prune [--max-age-ms N] Delete old done/failed messages, checkpoint WAL.
@@ -67,6 +134,7 @@ const BOOLEAN_FLAGS = new Set([
   "dry-run",
   "no-verify",
   "peek",
+  "json",
 ]);
 
 // Minimal long-flag parser: --key value (and --key=value). Bare positionals are
@@ -171,7 +239,11 @@ export async function main(argv) {
     }
     case "list": {
       const rows = list(flags);
-      process.stdout.write(JSON.stringify({ ok: true, agents: rows }) + "\n");
+      if (flags.json) {
+        process.stdout.write(JSON.stringify({ ok: true, agents: rows }) + "\n");
+        return 0;
+      }
+      process.stdout.write(renderAgents(rows, flags));
       return 0;
     }
     case "sweep": {

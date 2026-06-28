@@ -19,7 +19,10 @@ shell). So `send`/`reply`/`inbox` need no `--from`/`--me`; `bus whoami` confirms
 
 ## Subcommands
 
-- **`/bus list`** → `bus list` — live agents you can message.
+- **`/bus list`** → `bus list` — live agents grouped by tmux session (yours
+  first), each row showing how to reach it (a ready `--to` hint) and how much mail
+  it has waiting for you; your own row is marked `* … (you)`. Add `--json` for the
+  raw row array when scripting.
 - **`/bus inbox`** → `bus inbox` — read + consume your new mail (auto-acks
   `new`→`done`, so the Stop/doorbell drain won't re-deliver it). Add `--peek` for a
   read-only look that leaves mail for the drain.
@@ -35,6 +38,21 @@ shell). So `send`/`reply`/`inbox` need no `--from`/`--me`; `bus whoami` confirms
 - **`/bus reply <message-id> <message>`** → `bus reply --to-msg <id> --body <message> --doorbell`
   Targets the original sender, sets `reply_to`. `<message-id>` is the `#id` shown
   in each injected message.
+
+## Targeting: send first, list only on failure
+
+Trust the target the user names. For a `W#`, bare index, name, or `session:window`,
+run `send` **directly** — do NOT pre-check with `tmux list-windows` or `bus list`
+first. The resolver validates the target itself and, on failure, hands you the fix:
+
+- **ambiguous** → the error lists each candidate as `agent_id (session:window/pane)`;
+  resend addressed by `agent_id` or `session:window`.
+- **no match** → the error states the in-session rule; run `bus list` to discover
+  live agents only *then*.
+
+So a wrong guess costs one rejected send with the answer already in hand, not a
+round of discovery before every message. Reach for `bus list` to *explore* who is
+out there, not to *confirm* a target the user already named.
 
 ## Envelope — for long / multi-line / special-char bodies
 

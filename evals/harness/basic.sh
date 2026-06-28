@@ -38,7 +38,7 @@ CLAUDE_PROJECT_DIR="$REPO" TMUX_PANE="$PANE_A" BUS_BIN="$BUS_BIN" \
   bash -c 'printf "{\"session_id\":\"evA\",\"source\":\"startup\"}" | bash "'"$H"'/session-start.sh"' >/dev/null
 CLAUDE_PROJECT_DIR="$REPO" TMUX_PANE="$PANE_B" BUS_BIN="$BUS_BIN" \
   bash -c 'printf "{\"session_id\":\"evB\",\"source\":\"startup\"}" | bash "'"$H"'/session-start.sh"' >/dev/null
-NLIVE=$(BUS list | J 'd.agents.length')
+NLIVE=$(BUS list --json | J 'd.agents.length')
 chk "register two live agents" "$NLIVE" "2"
 
 # --- T13 whoami self-resolves identity from $TMUX_PANE (no BUS_AGENT_ID) ---
@@ -46,11 +46,11 @@ WHO=$(env -u BUS_AGENT_ID TMUX_PANE="$PANE_A" node "$BUS_BIN" whoami | J 'd.agen
 chk "T13 whoami self-resolves by pane" "$WHO" "claude-evA"
 
 # --- T2 UPSERT preserves started_at ---
-S1=$(BUS list | J 'd.agents.find(a=>a.agent_id=="claude-evA").started_at')
+S1=$(BUS list --json | J 'd.agents.find(a=>a.agent_id=="claude-evA").started_at')
 CLAUDE_PROJECT_DIR="$REPO" TMUX_PANE="$PANE_A" BUS_BIN="$BUS_BIN" \
   bash -c 'printf "{\"session_id\":\"evA\",\"source\":\"resume\"}" | bash "'"$H"'/session-start.sh"' >/dev/null
-S2=$(BUS list | J 'd.agents.find(a=>a.agent_id=="claude-evA").started_at')
-NLIVE2=$(BUS list | J 'd.agents.length')
+S2=$(BUS list --json | J 'd.agents.find(a=>a.agent_id=="claude-evA").started_at')
+NLIVE2=$(BUS list --json | J 'd.agents.length')
 chk "T2 UPSERT preserves started_at" "$S1" "$S2"
 chk "T2 no duplicate row" "$NLIVE2" "2"
 
@@ -60,7 +60,7 @@ NEWWIN=$(tmux new-window -t evalA -P -F '#{window_index}')
 tmux move-pane -s "$PANE_A" -t "evalA:$NEWWIN" 2>/dev/null
 CLAUDE_PROJECT_DIR="$REPO" TMUX_PANE="$PANE_A" BUS_BIN="$BUS_BIN" \
   bash -c 'printf "{\"session_id\":\"evA\",\"source\":\"resume\"}" | bash "'"$H"'/session-start.sh"' >/dev/null 2>&1
-STILL=$(BUS list | J 'd.agents.filter(a=>a.agent_id=="claude-evA").length')
+STILL=$(BUS list --json | J 'd.agents.filter(a=>a.agent_id=="claude-evA").length')
 chk "T3 identity survives pane move" "$STILL" "1"
 
 # --- T4 durable delivery (inbox --peek before claim, read-only) ---
@@ -122,7 +122,7 @@ BUS_AGENT_ID="claude-evA" BUS send --to claude-evB --kind notify --body "stale" 
 SID=$(BUS claim --me claude-evB | J 'd.messages[0].id')
 tmux kill-session -t evalB 2>/dev/null; sleep 0.3
 BUS sweep --stale-ms 0 >/dev/null
-DEADB=$(BUS list --all | J 'd.agents.find(a=>a.agent_id=="claude-evB").status')
+DEADB=$(BUS list --all --json | J 'd.agents.find(a=>a.agent_id=="claude-evB").status')
 REQUEUED=$(node --input-type=module -e 'import{DatabaseSync}from"node:sqlite";const db=new DatabaseSync(process.env.BUS_DB);console.log(db.prepare("SELECT status FROM messages WHERE id=?").get(Number(process.argv[1])).status)' "$SID")
 chk "T9 sweep marks dead agent" "$DEADB" "dead"
 chk "T9 sweep requeues stale claim" "$REQUEUED" "new"
@@ -172,7 +172,7 @@ SS "$PANE_CS" evCS   # claude-evCS  (sender, window 'sender')
 SS "$PANE_CR" evCR   # claude-evCR  (receiver, window 'bushopper')
 
 # --- T15 address a same-session peer by tmux window name ---
-WN=$(BUS list | J 'd.agents.find(a=>a.agent_id=="claude-evCR").window_name')
+WN=$(BUS list --json | J 'd.agents.find(a=>a.agent_id=="claude-evCR").window_name')
 chk "T15 register captures window_name" "$WN" "bushopper"
 TOID=$(BUS_AGENT_ID="claude-evCS" BUS send --to bushopper --kind notify --body "by-wname" | J 'd.message.to_agent')
 chk "T15 send resolves by window name (in session)" "$TOID" "claude-evCR"
@@ -212,19 +212,38 @@ echo "$FRAMED" | grep -q -- '--envelope' && ok "T18 frame nudges envelope" || ba
 # not linger 'live' -- its pane_pid is still alive, so the pid-sweep can't tell.
 SS "$PANE_CS" evCS2   # second session restarts in the sender's pane
 chk "T19 register evicts prior pane occupant" \
-  "$(BUS list --all | J 'd.agents.find(a=>a.agent_id=="claude-evCS").status')" "dead"
+  "$(BUS list --all --json | J 'd.agents.find(a=>a.agent_id=="claude-evCS").status')" "dead"
 chk "T19 one live agent on reused pane" \
-  "$(BUS list | J 'd.agents.filter(a=>a.pane=="'"$PANE_CS"'").length')" "1"
+  "$(BUS list --json | J 'd.agents.filter(a=>a.pane=="'"$PANE_CS"'").length')" "1"
 # Simulate a legacy-dirty db (two live rows on one pane, from pre-eviction code):
 node --input-type=module -e 'import{DatabaseSync}from"node:sqlite";new DatabaseSync(process.env.BUS_DB).prepare("UPDATE agents SET status=? WHERE agent_id=?").run("live","claude-evCS")'
 chk "T19 dirty db has two live on pane" \
-  "$(BUS list | J 'd.agents.filter(a=>a.pane=="'"$PANE_CS"'").length')" "2"
+  "$(BUS list --json | J 'd.agents.filter(a=>a.pane=="'"$PANE_CS"'").length')" "2"
 # bare window-name target collapses same-pane dupes -> resolves to newest (no ambiguity)
 RT=$(BUS_AGENT_ID="claude-evCR" BUS send --to sender --kind notify --body x | J 'd.message.to_agent')
 chk "T19 collapses same-pane dupes to newest" "$RT" "claude-evCS2"
 # ...and the send healed the registry back to one live on that pane
 chk "T19 sweep-on-insert heals pane to one live" \
-  "$(BUS list | J 'd.agents.filter(a=>a.pane=="'"$PANE_CS"'").length')" "1"
+  "$(BUS list --json | J 'd.agents.filter(a=>a.pane=="'"$PANE_CS"'").length')" "1"
+
+# --- T20 pretty `list`: grouped by session, --to hint, unread-for-you; --json stays machine-shaped ---
+# Seed two live agents in one session plus a message peer->me, directly in the db
+# (list reads 'live' rows without sweeping), so the view is deterministic offline.
+node --input-type=module -e '
+import { DatabaseSync } from "node:sqlite";
+const db = new DatabaseSync(process.env.BUS_DB);
+const t = Date.now();
+const a = db.prepare("INSERT OR REPLACE INTO agents(agent_id,agent_kind,instance_id,name,pid,pane,window,window_name,session_name,cwd,started_at,last_seen,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)");
+a.run("claude-t20me","claude","t20me","alpha",1,"%t20a",1,"alpha","sess20","/x",t,t,"live");
+a.run("claude-t20peer","claude","t20peer","beta",2,"%t20b",2,"beta","sess20","/x",t,t,"live");
+db.prepare("INSERT INTO messages(ts,from_agent,to_agent,kind,subject,body,reply_to,status,claimed_at) VALUES(?,?,?,?,?,?,?,?,?)").run(t,"claude-t20peer","claude-t20me","notify",null,"hi",null,"new",null);
+'
+LV=$(BUS_AGENT_ID="claude-t20me" BUS list)
+echo "$LV" | grep -q '^sess20$'                       && ok "T20 groups by session"            || bad "T20 groups by session"
+echo "$LV" | grep -q '(you)'                          && ok "T20 marks the caller (you)"       || bad "T20 marks the caller (you)"
+echo "$LV" | grep -qE -- '--to (2|beta|sess20:2|sess20:beta)' && ok "T20 shows a --to hint for the peer" || bad "T20 shows a --to hint for the peer"
+echo "$LV" | grep -q '1 unread'                       && ok "T20 shows unread-for-you"         || bad "T20 shows unread-for-you"
+chk "T20 list --json keeps the flat array" "$(BUS list --json | J 'Array.isArray(d.agents)')" "true"
 
 echo ""
 echo "== $PASS passed, $FAIL failed =="

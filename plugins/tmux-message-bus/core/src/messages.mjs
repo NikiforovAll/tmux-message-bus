@@ -64,6 +64,19 @@ export function callerSession(db, explicit) {
   return db.prepare("SELECT session_name FROM agents WHERE agent_id = ?").get(id)?.session_name ?? null;
 }
 
+// Count `me`'s unread (status='new') mail grouped by sender agent_id -- i.e. how
+// much each peer has waiting for the caller. Powers the `list` view's per-row
+// unread column; keeps the mailbox predicate in this module, not the CLI.
+export function unreadBySender(db, me) {
+  const out = {};
+  if (!me) return out;
+  for (const r of db
+    .prepare("SELECT from_agent, count(*) c FROM messages WHERE to_agent = ? AND status = 'new' GROUP BY from_agent")
+    .all(me))
+    out[r.from_agent] = r.c;
+  return out;
+}
+
 // A tmux pane hosts one foreground process, so multiple LIVE rows on a single
 // pane are stale registrations from sessions that restarted there (their shared
 // pane_pid defeats the pid-based sweep). Collapse same-pane candidates to the
