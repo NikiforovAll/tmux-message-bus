@@ -8,15 +8,27 @@
 #        the plugin dir only, so core must live within it)
 #   3. $CLAUDE_PLUGIN_ROOT/../../core/...    legacy repo layout (pre-relocation)
 #   4. `bus` on PATH
+# Run a Node script *file* by path. On Git Bash/MSYS the Windows node.exe does
+# not understand POSIX mount paths (/c/...) -- it reads "/c/x" as "C:\c\x" and
+# fails with MODULE_NOT_FOUND -- so cygpath -m rewrites to a mixed "C:/..." path
+# node accepts. Off MSYS cygpath is absent and the path passes through unchanged;
+# on an already-Windows path (e.g. $CLAUDE_PLUGIN_ROOT) cygpath -m is a no-op. So
+# every node-script invocation routes through here -- one rule, no per-path
+# exception. (Inline `node -e` has no path arg and is unaffected.)
+node_script() {
+  local script="$1"; shift
+  node "$(cygpath -m "$script" 2>/dev/null || printf '%s' "$script")" "$@"
+}
+
 BUS_CORE="${CLAUDE_PLUGIN_ROOT:-}/core/bin/bus.mjs"
 BUS_CORE_LEGACY="${CLAUDE_PLUGIN_ROOT:-}/../../core/bin/bus.mjs"
 bus() {
   if [ -n "${BUS_BIN:-}" ]; then
     "$BUS_BIN" "$@"
   elif [ -f "$BUS_CORE" ]; then
-    node "$BUS_CORE" "$@"
+    node_script "$BUS_CORE" "$@"
   elif [ -f "$BUS_CORE_LEGACY" ]; then
-    node "$BUS_CORE_LEGACY" "$@"
+    node_script "$BUS_CORE_LEGACY" "$@"
   else
     command bus "$@"
   fi

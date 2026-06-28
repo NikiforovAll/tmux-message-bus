@@ -1,15 +1,14 @@
-// Reads `bus claim` JSON on stdin, emits the injection payload for the given
-// mode, and writes the claimed ids (comma-sep) to argv[3] so the wrapper acks.
-// Empty inbox -> no output + empty ids file (Stop loop guard / no-op doorbell).
+// Reads `bus drain` JSON on stdin and emits the injection payload for the given
+// mode. The drain already resolved the rows (new->done) atomically, so there is
+// no ids file and no separate ack step. Empty inbox -> no output (Stop loop
+// guard / no-op doorbell).
 //
 //   mode "stop" -> {decision:"block", reason}            (re-prompts the agent)
 //   mode "ups"  -> {hookSpecificOutput:{hookEventName,    (injects as context
 //                    additionalContext}}                   on the doorbell turn)
-import { writeFileSync } from "node:fs";
 import { frame } from "./frame.mjs";
 
 const mode = process.argv[2];
-const idsFile = process.argv[3];
 
 let s = "";
 process.stdin.on("data", (d) => (s += d)).on("end", () => {
@@ -19,11 +18,7 @@ process.stdin.on("data", (d) => (s += d)).on("end", () => {
   } catch {
     messages = [];
   }
-  if (!messages.length) {
-    if (idsFile) writeFileSync(idsFile, "");
-    process.exit(0);
-  }
-  if (idsFile) writeFileSync(idsFile, messages.map((m) => m.id).join(","));
+  if (!messages.length) process.exit(0);
 
   const reason = frame(messages);
   const out =

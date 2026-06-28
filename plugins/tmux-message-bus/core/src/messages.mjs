@@ -401,24 +401,41 @@ export function prune(opts = {}) {
   }
 }
 
-// Atomically claim all new mail for an agent, ordered by id (total order).
-// Single UPDATE...RETURNING so two concurrent drains never claim the same row.
-// Claim-and-clear is the loop guard: the next drain sees an empty inbox.
-export function claim(opts) {
+// Shared body: one UPDATE...RETURNING that atomically moves this agent's `new`
+// mail to `toStatus`, id-ordered (total order). The single statement is what
+// makes concurrent takes disjoint -- two never grab the same row. `toStatus` is
+// an internal literal ('claimed'|'done'), never caller input.
+function takeNew(opts, toStatus, label) {
   const db = openDb({ create: true });
   try {
     const me = selfId(db, selfFlag(opts));
-    if (!me) throw new Error("claim: no identity ($BUS_AGENT_ID / $TMUX_PANE unset, no --me)");
+    if (!me) throw new Error(`${label}: no identity ($BUS_AGENT_ID / $TMUX_PANE unset, no --me)`);
     return db
       .prepare(
-        "UPDATE messages SET status = 'claimed', claimed_at = :now " +
+        `UPDATE messages SET status = '${toStatus}', claimed_at = :now ` +
           "WHERE to_agent = :me AND status = 'new' RETURNING *",
       )
-      .all({ now: now(), me });
+      .all({ now: now(), me })
+      .sort((a, b) => a.id - b.id);
   } finally {
     db.close();
   }
 }
+
+// Atomically claim all new mail for an agent, ordered by id (total order).
+// Single UPDATE...RETURNING so two concurrent drains never claim the same row.
+// Claim-and-clear is the loop guard: the next drain sees an empty inbox.
+export const claim = (opts) => takeNew(opts, "claimed", "claim");
+
+// Atomic drain: claim AND resolve new mail in a single statement (new -> done),
+// ordered by id. The drain hooks use this instead of claim + ack so there is no
+// 'claimed'-but-unacked window: claim and ack were two separate node processes,
+// and a hook killed between them (timeout, crash, silent ack error) stranded the
+// row in 'claimed' -> sweep requeued it -> the message was redelivered (the
+// duplicate). One statement closes that gap: a drain either delivers-and-resolves
+// or does neither. Trade-off is at-most-once -- a crash after this returns but
+// before the agent sees the framed batch loses it -- chosen over duplicates.
+export const drain = (opts) => takeNew(opts, "done", "drain");
 
 // Mark claimed messages done (or failed). Crash before ack leaves them
 // 'claimed' -> requeued by sweep. Accepts --ids "1,2,3"; default marks done.

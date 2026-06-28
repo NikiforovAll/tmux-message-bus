@@ -1,7 +1,7 @@
 // Command dispatch for the `bus` CLI. Agent-agnostic core.
 import { initDb, dbPath } from "./db.mjs";
 import { register, list, sweep } from "./agents.mjs";
-import { send, claim, ack, doorbell, prune, reply, inbox, show, selfId, selfFlag } from "./messages.mjs";
+import { send, claim, drain, ack, doorbell, prune, reply, inbox, show, selfId, selfFlag } from "./messages.mjs";
 import { openDb } from "./db.mjs";
 
 const USAGE = `bus — durable message bus for agents in tmux
@@ -39,6 +39,8 @@ Commands:
   show <id> (alias get) Read a single message by id (read-only, no claim/ack).
   doorbell --to <t>    Ring an agent's doorbell (resolve pid->pane, send-keys).
   claim [--me <id>]    Atomically claim new mail (RETURNING), ordered by id.
+  drain [--me <id>]    Atomically claim AND resolve new mail (new->done) in one
+                         statement -- the drain hooks' deliver step (no claim/ack gap).
   ack --ids <i,..>     Mark claimed messages done (--fail marks failed).
   whoami [--me <id>]   Print this caller's own agent_id ($BUS_AGENT_ID, else
                          self-located via $TMUX_PANE against the registry;
@@ -144,6 +146,11 @@ export async function main(argv) {
     }
     case "claim": {
       const rows = claim(flags);
+      process.stdout.write(JSON.stringify({ ok: true, messages: rows }) + "\n");
+      return 0;
+    }
+    case "drain": {
+      const rows = drain(flags);
       process.stdout.write(JSON.stringify({ ok: true, messages: rows }) + "\n");
       return 0;
     }

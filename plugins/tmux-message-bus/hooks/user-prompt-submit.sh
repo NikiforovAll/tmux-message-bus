@@ -18,13 +18,8 @@ case "$PROMPT" in
   *) exit 0 ;;              # ordinary prompt -> no-op
 esac
 
-CLAIM_JSON="$(bus claim 2>/dev/null)" || exit 0
+DRAIN_JSON="$(bus drain 2>/dev/null)" || exit 0
+CTX="$(printf '%s' "$DRAIN_JSON" | node_script "$DIR/format-inject.mjs" ups)"
 
-IDS_FILE="$(mktemp)"
-CTX="$(printf '%s' "$CLAIM_JSON" | node "$DIR/format-inject.mjs" ups "$IDS_FILE")"
-IDS="$(cat "$IDS_FILE" 2>/dev/null)"
-rm -f "$IDS_FILE"
-
-[ -n "$IDS" ] && bus ack --ids "$IDS" >/dev/null 2>&1
 [ -n "$CTX" ] && printf '%s' "$CTX"
 exit 0

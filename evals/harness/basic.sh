@@ -96,6 +96,18 @@ BUS ack --ids "$IDS" >/dev/null
 RECLAIM=$(BUS claim --me claude-evB | J 'd.messages.length')
 chk "T6 acked rows not re-claimed" "$RECLAIM" "0"
 
+# --- T6b drain atomically resolves (new->done) with no claim/ack gap ---
+# The drain hooks use `bus drain` so a killed hook can't strand a 'claimed' row
+# for the sweep to requeue (the duplicate). drain returns 'done' rows directly,
+# a second drain is empty, and sweep has nothing to requeue.
+BUS_AGENT_ID="claude-evB" BUS send --to claude-evA --kind notify --body "drain me" >/dev/null
+DR1=$(BUS drain --me claude-evA | J 'd.messages[0].status')
+chk "T6b drain resolves new->done in one step" "$DR1" "done"
+DR2=$(BUS drain --me claude-evA | J 'd.messages.length')
+chk "T6b drained mail not redelivered" "$DR2" "0"
+DRREQ=$(BUS sweep --stale-ms 0 | J 'd.requeued.length')
+chk "T6b drain leaves nothing for sweep to requeue" "$DRREQ" "0"
+
 # --- T7 doorbell delivery ---
 BUS doorbell --to claude-evB >/dev/null; sleep 0.3
 RANG=$(tmux capture-pane -t "$PANE_B" -p | grep -c 'bus')
@@ -191,7 +203,7 @@ SKIND=$(BUS show "$SID2" | J 'd.message.kind')
 chk "T17 envelope(stdin) + CLI flag override" "$SKIND" "request"
 
 # --- T18 injected frame carries reply/envelope hint ---
-FRAMED=$(BUS claim --me claude-evCR | node "$H/format-inject.mjs" stop /dev/null | J 'd.reason')
+FRAMED=$(BUS claim --me claude-evCR | node "$H/format-inject.mjs" stop | J 'd.reason')
 echo "$FRAMED" | grep -q 'bus reply --to-msg' && ok "T18 frame includes reply hint" || bad "T18 frame missing reply hint"
 echo "$FRAMED" | grep -q -- '--envelope' && ok "T18 frame nudges envelope" || bad "T18 frame missing envelope nudge"
 

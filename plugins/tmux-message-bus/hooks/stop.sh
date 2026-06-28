@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Stop: drain mail that arrived while this agent was mid-turn. Claim atomically,
-# inject the framed batch via {decision:"block"} so the agent keeps going, then
-# ack. Crash between claim and ack leaves rows 'claimed' -> requeued by sweep.
+# Stop: drain mail that arrived while this agent was mid-turn. One `bus drain`
+# atomically resolves the batch (new->done) and returns it, then we inject the
+# framed batch via {decision:"block"} so the agent keeps going. drain (not
+# claim+ack) closes the claim/ack gap: there is no 'claimed'-but-unacked window
+# for a killed hook to strand and have the sweep requeue (the duplicate).
 # Loop guard: an empty inbox produces no decision, so the agent may terminate.
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,15 +13,8 @@ read_payload
 init_agent_id
 [ -n "${SESSION_ID:-}" ] || exit 0
 
-CLAIM_JSON="$(bus claim 2>/dev/null)" || exit 0
-
-IDS_FILE="$(mktemp)"
-DECISION="$(printf '%s' "$CLAIM_JSON" | node "$DIR/format-inject.mjs" stop "$IDS_FILE")"
-IDS="$(cat "$IDS_FILE" 2>/dev/null)"
-rm -f "$IDS_FILE"
-
-# Ack the batch we just injected so the next Stop sees an empty inbox.
-[ -n "$IDS" ] && bus ack --ids "$IDS" >/dev/null 2>&1
+DRAIN_JSON="$(bus drain 2>/dev/null)" || exit 0
+DECISION="$(printf '%s' "$DRAIN_JSON" | node_script "$DIR/format-inject.mjs" stop)"
 
 # Emit the block decision (empty when no mail -> agent allowed to stop).
 [ -n "$DECISION" ] && printf '%s' "$DECISION"

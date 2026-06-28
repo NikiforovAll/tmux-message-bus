@@ -6,7 +6,7 @@ Agents today are mostly islands. If you have three Claude Code sessions open in 
 
 This experiment flips that around. **The filesystem is the transport** (one SQLite-WAL database), and `send-keys` is demoted to an optional *doorbell* — a best-effort "you've got mail" nudge. Lose the doorbell and nothing breaks; the message is already durably stored and gets picked up on the agent's next turn.
 
-The result is a mailbox model: **durable, ordered, at-least-once** delivery between agents that never have to be online simultaneously.
+The result is a mailbox model: **durable, ordered, no-duplicate** delivery between agents that never have to be online simultaneously.
 
 ## How it works
 
@@ -23,7 +23,7 @@ flowchart LR
 
     A -- "1 send (durable INSERT)" --> DB
     A -. "2 doorbell: send-keys «bus»<br/>(best-effort wake)" .-> B
-    B -- "3 claim → act → ack" --> DB
+    B -- "3 drain (atomic) → act" --> DB
 
     DB -. registry / liveness .- A
     DB -. registry / liveness .- B
@@ -42,14 +42,13 @@ sequenceDiagram
     A-->>B: doorbell «bus» (best-effort send-keys)
     activate B
     Note over B: next turn (woken by doorbell,<br/>or just its normal Stop hook)
-    B->>DB: claim (atomic, ordered by id)
+    B->>DB: drain (atomic new→done, ordered by id)
     Note over B: message injected as framed<br/>INFORMATION — B decides what to do
-    B->>DB: ack (mark done)
     deactivate B
     B->>DB: reply --to-msg (correlated)
 ```
 
-A periodic **sweep** marks crashed agents dead and requeues any mail they claimed-but-didn't-ack; **prune**/**gc** keep the DB bounded (a `SessionEnd` hook runs cleanup on graceful exit). Because identity and liveness are keyed on durable anchors, a renamed session or a moved pane is never mistaken for a dead agent.
+A periodic **sweep** marks crashed agents dead and requeues any mail left orphaned by a crashed claim; **prune**/**gc** keep the DB bounded (a `SessionEnd` hook runs cleanup on graceful exit). Because identity and liveness are keyed on durable anchors, a renamed session or a moved pane is never mistaken for a dead agent.
 
 ## A note on provenance
 
@@ -73,7 +72,7 @@ evals/                                 # deterministic transport harness + scena
 
 Two layers, deliberately decoupled:
 
-- **The core** (`plugins/tmux-message-bus/core/`) is an agent-agnostic Node CLI — `init`, `register`, `list`, `send`, `reply`, `inbox`, `claim`, `ack`, `show`, `sweep`, `prune`, `gc`, `doorbell`. It knows nothing about Claude; any agent that can run a shell command and set `BUS_AGENT_ID` can use it. (It lives *inside* the plugin so a marketplace install, which copies only the plugin dir, still ships it.)
+- **The core** (`plugins/tmux-message-bus/core/`) is an agent-agnostic Node CLI — `init`, `register`, `list`, `send`, `reply`, `inbox`, `drain`, `claim`, `ack`, `show`, `sweep`, `prune`, `gc`, `doorbell`. It knows nothing about Claude; any agent that can run a shell command and set `BUS_AGENT_ID` can use it. (It lives *inside* the plugin so a marketplace install, which copies only the plugin dir, still ships it.)
 - **The Claude adapter** (`plugins/tmux-message-bus/`) wires that core into Claude Code's lifecycle via hooks, packaged as its own installable plugin.
 
 ## Try it
