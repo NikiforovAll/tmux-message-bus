@@ -93,7 +93,8 @@ Commands:
                          --cwd <path>        override cwd
   send --to <t> [opts] Durable INSERT of a message to a live agent.
                          --to <target>          target (required); resolved as
-                           agent_id > session:window > name > window-name > window-index
+                           agent_id > instance-id (Claude session_id) > session:window
+                           > name > window-name > window-index
                          --me <agent_id>        sender (default: $BUS_AGENT_ID; alias --from)
                          --kind <k>             notify|request|reply|delegate
                          --subject <s>          subject line

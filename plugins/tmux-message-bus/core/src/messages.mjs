@@ -109,7 +109,8 @@ function evictPaneDuplicates(db, pane) {
 }
 
 // Resolve a --to target to a single live agent_id. Exact agent_id always wins
-// (global). Otherwise try, against LIVE agents: a tmux-style `session:window`
+// (global), then exact instance_id (also global — e.g. a Claude session id).
+// Otherwise try, against LIVE agents: a tmux-style `session:window`
 // qualifier (cross-session; window = name or index), then bare name, then
 // window_name, then window index. Bare lookups are scoped to the caller's own
 // session (`sessionName`) -- a window name/index means *your* window, never a
@@ -123,6 +124,23 @@ export function resolveTarget(db, target, cmd = "send", sessionName = null) {
   if (byId) return byId.agent_id;
 
   const COLS = "agent_id, name, window, window_name, session_name, pane, started_at";
+
+  // Exact instance_id (e.g. a Claude session id — the adapter registers with
+  // --instance "$SESSION_ID" and agent_id = claude-<session_id>). An instance id
+  // is a global identity like agent_id, not a tmux location, so it resolves
+  // cross-session and must run before the bare-target/no-session rejection —
+  // a spawned agent replying to $PARENT_SESSION_ID has no caller session to scope by.
+  const byInstance = collapsePane(
+    db.prepare(`SELECT ${COLS} FROM agents WHERE status = 'live' AND instance_id = ?`).all(target),
+  );
+  if (byInstance.length === 1) return byInstance[0].agent_id;
+  if (byInstance.length > 1) {
+    const list = byInstance
+      .map((a) => `${a.agent_id} (${a.session_name}:${a.window_name ?? a.window}/${a.pane})`)
+      .join(", ");
+    throw new Error(`${cmd}: ambiguous target '${target}' -> ${list}; address by agent_id or session:window`);
+  }
+
   const tiers = [];
 
   // session:window -> mirrors tmux `-t`; window part is a name or an index.

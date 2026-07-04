@@ -27,13 +27,17 @@ shell). So `send`/`reply`/`inbox` need no `--from`/`--me`; `bus whoami` confirms
   read-only look that leaves mail for the drain.
 - **`/bus send <target> <message>`** → `bus send --to <target> --body <message> --doorbell`
   Durable INSERT + doorbell. `--kind request|delegate` for an ask; `--subject`.
-  `<target>` resolves: `agent_id` (global) → `session:window` (cross-session) →
-  bare `name`/window-name/window-index (**within your own session only** — e.g.
-  `--to build`, `--to 2`; cross sessions with `session:window` like `--to main:1`,
-  or the `agent_id`). Ambiguous → rejected with candidates.
+  `<target>` resolves: `agent_id` (global) → Claude **session id** (global) →
+  `session:window` (cross-session) → bare `name`/window-name/window-index
+  (**within your own session only** — e.g. `--to build`, `--to 2`; cross sessions
+  with `session:window` like `--to main:1`, or the `agent_id`). Ambiguous →
+  rejected with candidates.
   - **`W#` shorthand:** when the user names a target as `W<n>` (e.g. `W1`, `w2`),
     it means **window `n` in your session** — strip the `W`/`w` and pass the index:
     "send to W1" → `bus send --to 1 ...`. Other sessions still need `session:window`.
+  - **Session-id targeting:** a Claude session id (e.g. from `$PARENT_SESSION_ID`)
+    is a global target — pass it as-is: `bus send --to "$PARENT_SESSION_ID" ...`
+    (equivalently `--to claude-<session-id>`, the agent_id form).
 - **`/bus reply <message-id> <message>`** → `bus reply --to-msg <id> --body <message> --doorbell`
   Targets the original sender, sets `reply_to`. `<message-id>` is the `#id` shown
   in each injected message.
