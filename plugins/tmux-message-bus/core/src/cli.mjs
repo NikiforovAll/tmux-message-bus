@@ -116,6 +116,7 @@ Commands:
   claim [--me <id>]    Atomically claim new mail (RETURNING), ordered by id.
   drain [--me <id>]    Atomically claim AND resolve new mail (new->done) in one
                          statement -- the drain hooks' deliver step (no claim/ack gap).
+                         --register          run 'register' first (same opts apply)
   ack --ids <i,..>     Mark claimed messages done (--fail marks failed).
   whoami [--me <id>]   Print this caller's own agent_id ($BUS_AGENT_ID, else
                          self-located via $TMUX_PANE against the registry;
@@ -146,6 +147,7 @@ const BOOLEAN_FLAGS = new Set([
   "no-verify",
   "peek",
   "json",
+  "register",
 ]);
 
 // Minimal long-flag parser: --key value (and --key=value). Bare positionals are
@@ -227,6 +229,9 @@ export async function main(argv) {
       return 0;
     }
     case "drain": {
+      // --register: UPSERT first so drains from hooks refresh location and heal
+      // identity even when SessionStart never ran (one node spawn, not two).
+      if (flags.register) register(flags);
       const rows = drain(flags);
       process.stdout.write(JSON.stringify({ ok: true, messages: rows }) + "\n");
       return 0;

@@ -13,7 +13,7 @@ read_payload
 init_agent_id
 [ -n "${SESSION_ID:-}" ] || exit 0
 
-DRAIN_JSON="$(bus drain 2>/dev/null)" || exit 0
+DRAIN_JSON="$(drain_registered 2>/dev/null)" || exit 0
 DECISION="$(printf '%s' "$DRAIN_JSON" | node_script "$DIR/format-inject.mjs" stop)"
 
 # Emit the block decision (empty when no mail -> agent allowed to stop).

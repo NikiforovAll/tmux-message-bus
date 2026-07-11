@@ -1,7 +1,7 @@
 // Queue operations on the `messages` table (agent-agnostic).
 // Delivery (durable INSERT) is separate from notification (best-effort doorbell).
 import { openDb } from "./db.mjs";
-import { resolvePaneByPid, sendKeysSentinel, agentAlive } from "./identity.mjs";
+import { resolvePaneByPid, sendKeysSentinel, agentAlive, liveLocation, reanchor } from "./identity.mjs";
 import { readFileSync } from "node:fs";
 
 // Fixed wake sentinel. The adapter's UserPromptSubmit hook recognizes it and
@@ -56,12 +56,29 @@ function asIndex(s) {
   return /^\d+$/.test(t) ? Number(t) : null;
 }
 
+// One agent's registry row plus its live tmux position (loc is null when the
+// pane is gone or on another server -- stored values remain the fallback).
+function liveRowOf(db, agent_id) {
+  const row = db
+    .prepare("SELECT pid, pane, window, window_name, session_name FROM agents WHERE agent_id = ?")
+    .get(agent_id);
+  return row ? { row, loc: liveLocation(row) } : null;
+}
+
+// The agent's CURRENT tmux session: live pane position first, stored value as
+// the fallback when the pane is gone (or tmux is unreachable). Keeps session
+// scoping true after the caller's window is moved to another session.
+function liveSessionOf(db, agent_id) {
+  const r = liveRowOf(db, agent_id);
+  return r ? (r.loc?.session_name ?? r.row.session_name) : null;
+}
+
 // The caller's own tmux session, used to scope bare lookups. Null when the
 // caller has no resolvable identity/session (e.g. a non-tmux shell).
 export function callerSession(db, explicit) {
   const id = selfId(db, explicit);
   if (!id) return null;
-  return db.prepare("SELECT session_name FROM agents WHERE agent_id = ?").get(id)?.session_name ?? null;
+  return liveSessionOf(db, id);
 }
 
 // Count `me`'s unread (status='new') mail grouped by sender agent_id -- i.e. how
@@ -108,10 +125,29 @@ function evictPaneDuplicates(db, pane) {
   ).run(pane, pane);
 }
 
+// All LIVE rows, each re-anchored (in memory only) to where its pane is NOW.
+// A row whose pane is gone / on another server keeps its stored location --
+// still addressable, and send's liveness verify has the final say. Collapsed
+// to one row per pane up front so a stale corpse can never win a tier its
+// pane's real occupant doesn't.
+function liveRows(db) {
+  return reanchor(
+    collapsePane(
+      db
+        .prepare(
+          "SELECT agent_id, instance_id, name, pid, window, window_name, session_name, pane, started_at " +
+            "FROM agents WHERE status = 'live'",
+        )
+        .all(),
+    ),
+  );
+}
+
 // Resolve a --to target to a single live agent_id. Exact agent_id always wins
 // (global), then exact instance_id (also global — e.g. a Claude session id).
-// Otherwise try, against LIVE agents: a tmux-style `session:window`
-// qualifier (cross-session; window = name or index), then bare name, then
+// Otherwise try, against LIVE agents at their CURRENT tmux position (never the
+// register-time snapshot): a tmux-style `session:window` qualifier
+// (cross-session; window = name or index), then bare name, then
 // window_name, then window index. Bare lookups are scoped to the caller's own
 // session (`sessionName`) -- a window name/index means *your* window, never a
 // peer's in another session; reach across sessions with `session:window` or the
@@ -123,23 +159,22 @@ export function resolveTarget(db, target, cmd = "send", sessionName = null) {
   const byId = db.prepare("SELECT agent_id FROM agents WHERE agent_id = ?").get(target);
   if (byId) return byId.agent_id;
 
-  const COLS = "agent_id, name, window, window_name, session_name, pane, started_at";
+  const rows = liveRows(db);
+  const ambiguous = (cand) => {
+    const list = cand
+      .map((a) => `${a.agent_id} (${a.session_name}:${a.window_name ?? a.window}/${a.pane})`)
+      .join(", ");
+    return new Error(`${cmd}: ambiguous target '${target}' -> ${list}; address by agent_id or session:window`);
+  };
 
   // Exact instance_id (e.g. a Claude session id — the adapter registers with
   // --instance "$SESSION_ID" and agent_id = claude-<session_id>). An instance id
   // is a global identity like agent_id, not a tmux location, so it resolves
   // cross-session and must run before the bare-target/no-session rejection —
   // a spawned agent replying to $PARENT_SESSION_ID has no caller session to scope by.
-  const byInstance = collapsePane(
-    db.prepare(`SELECT ${COLS} FROM agents WHERE status = 'live' AND instance_id = ?`).all(target),
-  );
+  const byInstance = rows.filter((r) => r.instance_id === target);
   if (byInstance.length === 1) return byInstance[0].agent_id;
-  if (byInstance.length > 1) {
-    const list = byInstance
-      .map((a) => `${a.agent_id} (${a.session_name}:${a.window_name ?? a.window}/${a.pane})`)
-      .join(", ");
-    throw new Error(`${cmd}: ambiguous target '${target}' -> ${list}; address by agent_id or session:window`);
-  }
+  if (byInstance.length > 1) throw ambiguous(byInstance);
 
   const tiers = [];
 
@@ -149,13 +184,11 @@ export function resolveTarget(db, target, cmd = "send", sessionName = null) {
   if (colon !== -1) {
     const sess = target.slice(0, colon);
     const win = target.slice(colon + 1);
+    const idx = asIndex(win);
     tiers.push(() =>
-      db
-        .prepare(
-          `SELECT ${COLS} FROM agents WHERE status = 'live' AND session_name = ? ` +
-            "AND (window_name = ? OR window = ?)",
-        )
-        .all(sess, win, asIndex(win)),
+      rows.filter(
+        (r) => r.session_name === sess && (r.window_name === win || (idx !== null && r.window === idx)),
+      ),
     );
   } else if (!sessionName) {
     // Bare target, but the caller has no resolvable session to scope to. Refuse
@@ -169,37 +202,20 @@ export function resolveTarget(db, target, cmd = "send", sessionName = null) {
 
   // Bare name/window-name/index: scoped to the caller's session. Only run when a
   // session is known -- the no-session case is rejected above. Tiers are lazy
-  // thunks so an earlier match short-circuits the later queries.
+  // thunks so an earlier match short-circuits the later ones.
   if (sessionName) {
-    tiers.push(() =>
-      db
-        .prepare(`SELECT ${COLS} FROM agents WHERE status = 'live' AND name = ? AND session_name = ?`)
-        .all(target, sessionName),
-    );
-    tiers.push(() =>
-      db
-        .prepare(`SELECT ${COLS} FROM agents WHERE status = 'live' AND window_name = ? AND session_name = ?`)
-        .all(target, sessionName),
-    );
+    tiers.push(() => rows.filter((r) => r.name === target && r.session_name === sessionName));
+    tiers.push(() => rows.filter((r) => r.window_name === target && r.session_name === sessionName));
     const idx = asIndex(target);
     if (idx !== null) {
-      tiers.push(() =>
-        db
-          .prepare(`SELECT ${COLS} FROM agents WHERE status = 'live' AND window = ? AND session_name = ?`)
-          .all(idx, sessionName),
-      );
+      tiers.push(() => rows.filter((r) => r.window === idx && r.session_name === sessionName));
     }
   }
 
   for (const run of tiers) {
-    const cand = collapsePane(run());
+    const cand = run();
     if (cand.length === 1) return cand[0].agent_id;
-    if (cand.length > 1) {
-      const list = cand
-        .map((a) => `${a.agent_id} (${a.session_name}:${a.window_name ?? a.window}/${a.pane})`)
-        .join(", ");
-      throw new Error(`${cmd}: ambiguous target '${target}' -> ${list}; address by agent_id or session:window`);
-    }
+    if (cand.length > 1) throw ambiguous(cand);
   }
   const where = sessionName ? ` in session '${sessionName}'` : "";
   throw new Error(
@@ -265,23 +281,28 @@ export function send(opts) {
   const db = openDb({ create: true });
   try {
     const from_agent = selfId(db, selfFlag(opts));
-    // Scope bare-target resolution to the sender's own session. Derive it from
-    // from_agent's row rather than re-running selfId via callerSession.
-    const sessionName = from_agent
-      ? (db.prepare("SELECT session_name FROM agents WHERE agent_id = ?").get(from_agent)?.session_name ?? null)
-      : null;
+    // Scope bare-target resolution to the sender's CURRENT session (live pane
+    // position, not the register-time snapshot).
+    const sessionName = from_agent ? liveSessionOf(db, from_agent) : null;
     const to_agent = resolveTarget(db, opts.to, opts.cmd ?? "send", sessionName);
+    const target = liveRowOf(db, to_agent);
+    // Persist the resolved target's live location -- only the row that matters
+    // now, never a bulk rewrite of agents whose panes may be long gone.
+    if (target?.loc) {
+      db.prepare(
+        "UPDATE agents SET pane = ?, window = ?, window_name = ?, session_name = ? WHERE agent_id = ?",
+      ).run(target.loc.pane, target.loc.window, target.loc.window_name, target.loc.session_name, to_agent);
+    }
     // Sweep-on-insert: heal stale same-pane duplicates on the target's pane so
     // the registry reflects one live agent per pane (newest wins).
-    evictPaneDuplicates(db, db.prepare("SELECT pane FROM agents WHERE agent_id = ?").get(to_agent)?.pane);
+    evictPaneDuplicates(db, target?.loc?.pane ?? target?.row.pane);
     // Sweep-on-send: verify the target is still alive so we never queue mail to
-    // a corpse and never report a dead agent as a live target. --no-verify skips.
-    if (!opts["no-verify"]) {
-      const a = db.prepare("SELECT pid FROM agents WHERE agent_id = ?").get(to_agent);
-      if (a && !agentAlive(a.pid)) {
-        db.prepare("UPDATE agents SET status = 'dead' WHERE agent_id = ?").run(to_agent);
-        throw new Error(`send: target '${to_agent}' is no longer live (swept)`);
-      }
+    // a corpse and never report a dead agent as a live target (a live pane id
+    // can be a respawn with a different pid, so check even when loc resolved).
+    // --no-verify skips.
+    if (!opts["no-verify"] && target && !agentAlive(target.row.pid)) {
+      db.prepare("UPDATE agents SET status = 'dead' WHERE agent_id = ?").run(to_agent);
+      throw new Error(`send: target '${to_agent}' is no longer live (swept)`);
     }
     const row = {
       ts: now(),

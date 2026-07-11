@@ -18,7 +18,7 @@ case "$PROMPT" in
   *) exit 0 ;;              # ordinary prompt -> no-op
 esac
 
-DRAIN_JSON="$(bus drain 2>/dev/null)" || exit 0
+DRAIN_JSON="$(drain_registered 2>/dev/null)" || exit 0
 CTX="$(printf '%s' "$DRAIN_JSON" | node_script "$DIR/format-inject.mjs" ups)"
 
 [ -n "$CTX" ] && printf '%s' "$CTX"

@@ -2,12 +2,15 @@
 # Plain ASCII; Git Bash / MSYS2 first-class.
 
 # Resolve the agent-agnostic core `bus` CLI, in priority order:
-#   1. $BUS_BIN                              explicit override
-#   2. $CLAUDE_PLUGIN_ROOT/core/bin/bus.mjs  core bundled INSIDE the plugin
-#        (the only layout that survives a marketplace install -- the cache copies
-#        the plugin dir only, so core must live within it)
-#   3. $CLAUDE_PLUGIN_ROOT/../../core/...    legacy repo layout (pre-relocation)
-#   4. `bus` on PATH
+#   1. $BUS_BIN                              explicit override (executable, or a
+#        .mjs path run via node -- how the eval harness pins hooks to repo core)
+#   2. `bus` on PATH                         an installed/npm-linked CLI: prefer
+#        it so hooks run the SAME code as interactive `bus` commands, instead of
+#        the plugin cache's frozen copy going stale between plugin releases
+#   3. $CLAUDE_PLUGIN_ROOT/core/bin/bus.mjs  core bundled INSIDE the plugin --
+#        the no-install fallback (the marketplace cache copies the plugin dir
+#        only, so core must live within it)
+#   4. $CLAUDE_PLUGIN_ROOT/../../core/...    legacy repo layout (pre-relocation)
 # Run a Node script *file* by path. On Git Bash/MSYS the Windows node.exe does
 # not understand POSIX mount paths (/c/...) -- it reads "/c/x" as "C:\c\x" and
 # fails with MODULE_NOT_FOUND -- so cygpath -m rewrites to a mixed "C:/..." path
@@ -24,7 +27,12 @@ BUS_CORE="${CLAUDE_PLUGIN_ROOT:-}/core/bin/bus.mjs"
 BUS_CORE_LEGACY="${CLAUDE_PLUGIN_ROOT:-}/../../core/bin/bus.mjs"
 bus() {
   if [ -n "${BUS_BIN:-}" ]; then
-    "$BUS_BIN" "$@"
+    case "$BUS_BIN" in
+      *.mjs) node_script "$BUS_BIN" "$@" ;;
+      *) "$BUS_BIN" "$@" ;;
+    esac
+  elif type -P bus >/dev/null 2>&1; then
+    command bus "$@"
   elif [ -f "$BUS_CORE" ]; then
     node_script "$BUS_CORE" "$@"
   elif [ -f "$BUS_CORE_LEGACY" ]; then
@@ -56,4 +64,13 @@ payload_field() {
 init_agent_id() {
   SESSION_ID="$(payload_field session_id)"
   export BUS_AGENT_ID="claude-${SESSION_ID}"
+}
+
+# Drain with re-register in one bus invocation (one node spawn): refreshes
+# location, evicts stale same-pane occupants, and heals identity when
+# SessionStart never ran for this session (plugin loaded mid-session) so
+# pane-based self-location finds the right row.
+drain_registered() {
+  bus drain --register --kind claude --instance "$SESSION_ID" \
+    --name "$(basename "${CLAUDE_PROJECT_DIR:-$PWD}")"
 }

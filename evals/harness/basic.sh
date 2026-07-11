@@ -9,6 +9,14 @@ BUS_BIN="$REPO/plugins/tmux-message-bus/core/bin/bus.mjs"
 export CLAUDE_PLUGIN_ROOT="$REPO/plugins/tmux-message-bus"
 H="$CLAUDE_PLUGIN_ROOT/hooks"
 WORK="$(mktemp -d)"
+# Windows node.exe cannot read POSIX /c/... or /tmp/... mount paths -- rewrite
+# to mixed C:/ form on MSYS (cygpath is absent elsewhere; paths pass through).
+wpath() { cygpath -m "$1" 2>/dev/null || printf '%s' "$1"; }
+BUS_BIN="$(wpath "$BUS_BIN")"
+WORK="$(wpath "$WORK")"
+# Pin hooks to the repo core under test: lib.sh prefers an installed PATH `bus`
+# over the bundled copy, which would leak the user's global install into the eval.
+export BUS_BIN
 export BUS_DB="$WORK/bus.db"
 BUS() { node "$BUS_BIN" "$@"; }
 J() { node -e 'const fs=require("fs");const s=fs.readFileSync(0,"utf8");if(s.trim()){const d=JSON.parse(s);const v=eval(process.argv[1]);process.stdout.write(v==null?"":String(v))}' "$1"; }
@@ -18,7 +26,7 @@ ok()   { echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 chk()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want=$3 got=$2)"; fi; }
 
-cleanup() { tmux kill-session -t evalA 2>/dev/null; tmux kill-session -t evalB 2>/dev/null; tmux kill-session -t evalC 2>/dev/null; rm -rf "$WORK"; }
+cleanup() { tmux kill-session -t evalA 2>/dev/null; tmux kill-session -t evalB 2>/dev/null; tmux kill-session -t evalC 2>/dev/null; tmux kill-session -t evalD 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 
 echo "== bus transport eval =="
@@ -203,7 +211,7 @@ SKIND=$(BUS show "$SID2" | J 'd.message.kind')
 chk "T17 envelope(stdin) + CLI flag override" "$SKIND" "request"
 
 # --- T18 injected frame carries reply/envelope hint ---
-FRAMED=$(BUS claim --me claude-evCR | node "$H/format-inject.mjs" stop | J 'd.reason')
+FRAMED=$(BUS claim --me claude-evCR | node "$(wpath "$H/format-inject.mjs")" stop | J 'd.reason')
 echo "$FRAMED" | grep -q 'bus reply --to-msg' && ok "T18 frame includes reply hint" || bad "T18 frame missing reply hint"
 echo "$FRAMED" | grep -q -- '--envelope' && ok "T18 frame nudges envelope" || bad "T18 frame missing envelope nudge"
 
@@ -244,6 +252,29 @@ echo "$LV" | grep -q '(you)'                          && ok "T20 marks the calle
 echo "$LV" | grep -qE -- '--to (2|beta|sess20:2|sess20:beta)' && ok "T20 shows a --to hint for the peer" || bad "T20 shows a --to hint for the peer"
 echo "$LV" | grep -q '1 unread'                       && ok "T20 shows unread-for-you"         || bad "T20 shows unread-for-you"
 chk "T20 list --json keeps the flat array" "$(BUS list --json | J 'Array.isArray(d.agents)')" "true"
+
+# --- T21 true location: a window moved to another session resolves at its
+#     CURRENT position, without re-registering (live pane map, not the
+#     register-time snapshot). Only the resolved target's row is persisted.
+read PANE_MV PP_MV <<< "$(tmux new-session -d -s evalD -n mover -P -F '#{pane_id} #{pane_pid}' 'cat')"
+tmux set-window-option -t evalD: automatic-rename off 2>/dev/null
+SS "$PANE_MV" evMV   # claude-evMV registers while in evalD
+tmux move-window -s evalD:mover -t evalC:7   # cross-session move; no re-register
+chk "T21 list shows the moved agent's live session" \
+  "$(BUS list --json | J 'd.agents.find(a=>a.agent_id=="claude-evMV").session_name')" "evalC"
+# target side: bare window-name now means evalC's window
+T21A=$(BUS_AGENT_ID="claude-evCS2" BUS send --to mover --kind notify --body x | J 'd.message.to_agent')
+chk "T21 bare name resolves at the moved-to position" "$T21A" "claude-evMV"
+# ...and the send persisted the target's (and only the target's) live location
+chk "T21 send persists the target's live location" \
+  "$(node --input-type=module -e 'import{DatabaseSync}from"node:sqlite";console.log(new DatabaseSync(process.env.BUS_DB).prepare("SELECT session_name FROM agents WHERE agent_id=?").get("claude-evMV").session_name)')" \
+  "evalC"
+# the old address no longer resolves -- the window is not in evalD anymore
+T21B=$(BUS_AGENT_ID="claude-evCS2" BUS send --to "evalD:mover" --kind notify --body x 2>&1; echo "rc=$?")
+echo "$T21B" | grep -q 'rc=1' && ok "T21 stale session:window no longer resolves" || bad "T21 stale address still resolves ($T21B)"
+# caller side: evMV's bare lookups are now scoped to evalC (its live session)
+T21C=$(BUS_AGENT_ID="claude-evMV" BUS send --to sender --kind notify --body x | J 'd.message.to_agent')
+chk "T21 caller session scope follows the move" "$T21C" "claude-evCS2"
 
 echo ""
 echo "== $PASS passed, $FAIL failed =="

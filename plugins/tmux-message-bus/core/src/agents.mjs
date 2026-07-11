@@ -1,6 +1,6 @@
 // Registry operations on the `agents` table (agent-agnostic).
 import { openDb } from "./db.mjs";
-import { tmuxContext, agentAlive } from "./identity.mjs";
+import { tmuxContext, agentAlive, reanchor } from "./identity.mjs";
 import { selfFlag, toInt } from "./messages.mjs";
 
 // Claimed messages older than this are presumed orphaned by a crashed drain
@@ -79,13 +79,18 @@ export function register(opts) {
 }
 
 // List registered agents. Live only by default; --all includes dead.
+// Rows are re-anchored (in memory only, nothing persisted) to where their
+// panes are NOW, so session grouping and --to hints match reality even after
+// window moves/renames; a row whose pane is gone keeps its stored location.
 export function list(opts = {}) {
   const db = openDb();
   try {
     const sql = opts.all
       ? "SELECT * FROM agents ORDER BY last_seen DESC"
       : "SELECT * FROM agents WHERE status = 'live' ORDER BY last_seen DESC";
-    return db.prepare(sql).all();
+    const rows = db.prepare(sql).all();
+    reanchor(rows.filter((r) => r.status === "live"));
+    return rows;
   } finally {
     db.close();
   }
