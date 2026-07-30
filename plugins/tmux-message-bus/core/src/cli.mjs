@@ -110,7 +110,10 @@ Commands:
                          [--no-verify] [--envelope <path|->]
   inbox [--me <id>] [--peek] [--status S]  Read new mail; auto-acks (new->done).
                          --peek  read-only, do not consume (leave for the drain).
+                           Does NOT widen the status filter -- see --status.
                          --status new|claimed|done|failed  (default: new; non-new is read-only)
+                         An empty result carries a "hint" explaining why (e.g. the
+                           drain hook already consumed it into this turn).
   show <id> (alias get) Read a single message by id (read-only, no claim/ack).
   doorbell --to <t>    Ring an agent's doorbell (resolve pid->pane, send-keys).
   claim [--me <id>]    Atomically claim new mail (RETURNING), ordered by id.
@@ -121,6 +124,8 @@ Commands:
   whoami [--me <id>]   Print this caller's own agent_id ($BUS_AGENT_ID, else
                          self-located via $TMUX_PANE against the registry;
                          --me overrides both; --id/--from accepted as aliases).
+                         Takes a global id -- an agent_id or a Claude session id,
+                         not a name/window -- and errors if it matches none.
   list [--all] [--json]
                        Live agents grouped by session, with a --to hint and
                          unread-for-you per row (--all includes dead). --json
@@ -208,8 +213,12 @@ export async function main(argv) {
       return 0;
     }
     case "inbox": {
-      const rows = inbox(flags);
-      process.stdout.write(JSON.stringify({ ok: true, messages: rows }) + "\n");
+      // hint only accompanies an empty read -- it explains why (e.g. the drain
+      // hook already consumed the mail into this turn's context).
+      const { messages, hint } = inbox(flags);
+      process.stdout.write(
+        JSON.stringify({ ok: true, messages, ...(hint ? { hint } : {}) }) + "\n",
+      );
       return 0;
     }
     case "show":

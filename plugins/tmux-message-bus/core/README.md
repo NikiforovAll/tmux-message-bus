@@ -30,8 +30,9 @@ All commands print one line of JSON (`{"ok":true,...}`).
 Three layers: `agent_id` (logical PK, the mailbox owner — `$BUS_AGENT_ID`),
 `pid` (physical anchor, the tmux `pane_pid`), and pane/window/session (mutable
 location, refreshed on every `register`). Liveness uses tmux pane existence
-(`agentAlive`), because on Windows the `pane_pid` is a Cygwin pid that Node's
-`process.kill` can't see.
+(`agentLiveness`), because on Windows the `pane_pid` is a Cygwin pid that Node's
+`process.kill` can't see. It is tri-state — `true`/`false`/`null` for *unknown*,
+when tmux itself did not answer — and only an explicit `false` may condemn a row.
 
 ## Other agents
 

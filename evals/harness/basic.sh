@@ -276,6 +276,76 @@ echo "$T21B" | grep -q 'rc=1' && ok "T21 stale session:window no longer resolves
 T21C=$(BUS_AGENT_ID="claude-evMV" BUS send --to sender --kind notify --body x | J 'd.message.to_agent')
 chk "T21 caller session scope follows the move" "$T21C" "claude-evCS2"
 
+# --- T22 self-identity resolves like --to, and fails loudly when it cannot ---
+# Regression: --me took its value VERBATIM as the mailbox key, so a Claude session
+# id (which --to resolves fine) addressed a nonexistent mailbox and every read
+# returned an empty list with ok:true -- a healthy bus looking like lost mail.
+chk "T22 --me accepts a bare instance/session id" \
+  "$(BUS whoami --me evA | J 'd.agent_id')" "claude-evA"
+chk "T22 --me accepts the agent_id form" \
+  "$(BUS whoami --me claude-evA | J 'd.agent_id')" "claude-evA"
+T22C=$(BUS inbox --me no-such-session-id 2>&1; echo "rc=$?")
+echo "$T22C" | grep -q 'rc=1' && ok "T22 unknown identity exits non-zero" || bad "T22 unknown identity accepted ($T22C)"
+echo "$T22C" | grep -q 'unknown identity' && ok "T22 unknown identity names the problem" || bad "T22 unknown identity message unclear ($T22C)"
+# A bare session id must reach the SAME mailbox --to would have written to.
+# Drain first: earlier cases leave mail for evA, so an absolute count would be
+# a hostage to test order.
+BUS inbox --me claude-evA >/dev/null
+BUS_AGENT_ID="claude-evB" BUS send --to evA --kind notify --body "by-instance-id" >/dev/null
+chk "T22 --me <session-id> reads the mail --to <session-id> delivered" \
+  "$(BUS inbox --me evA | J 'd.messages.length')" "1"
+
+# --- T22b empty inbox explains itself (drain already consumed it) ---
+# The hooks drain new->done before the agent's first tool call, so an empty read
+# on a <<bus>> turn is success. A bare [] made that indistinguishable from loss.
+EH=$(BUS inbox --me evA)
+chk "T22b empty inbox is still ok:true with no messages" "$(printf '%s' "$EH" | J 'd.messages.length')" "0"
+printf '%s' "$EH" | grep -q 'hint' && ok "T22b empty inbox carries a hint" || bad "T22b empty inbox has no hint ($EH)"
+printf '%s' "$EH" | grep -q 'status done' && ok "T22b hint points at the drained mail" || bad "T22b hint omits the re-read path ($EH)"
+
+# --- T22c tmux unreachable is UNKNOWN, never "dead" ---
+# A transient tmux socket failure used to (a) NULL a live agent's pid/pane via
+# register's unconditional overwrite and (b) make liveness false for every
+# tmux agent -- so one flaky exec could sweep the whole registry. Simulated by
+# running with a PATH that has no tmux (node by absolute path so it still runs).
+NODE_BIN="$(command -v node)"
+mkdir -p "$WORK/nobin"
+NOTMUX() { PATH="$WORK/nobin" "$NODE_BIN" "$BUS_BIN" "$@"; }
+PID_BEFORE=$(BUS list --all --json | J 'd.agents.find(a=>a.agent_id=="claude-evA").pid')
+NOTMUX register --me claude-evA --kind claude --instance evA --name evala >/dev/null
+chk "T22c register during a tmux outage keeps the pid anchor" \
+  "$(BUS list --all --json | J 'd.agents.find(a=>a.agent_id=="claude-evA").pid')" "$PID_BEFORE"
+chk "T22c register during a tmux outage keeps the pane anchor" \
+  "$(BUS list --all --json | J 'd.agents.find(a=>a.agent_id=="claude-evA").pane')" "$PANE_A"
+SWU=$(NOTMUX sweep)
+chk "T22c sweep condemns nobody when tmux is unreachable" "$(printf '%s' "$SWU" | J 'd.dead.length')" "0"
+printf '%s' "$SWU" | grep -q 'unknown' && ok "T22c sweep reports unknown liveness" || bad "T22c sweep hides unknown liveness ($SWU)"
+chk "T22c the agent survives the outage sweep" \
+  "$(BUS list --all --json | J 'd.agents.find(a=>a.agent_id=="claude-evA").status')" "live"
+# ...and a send to it is still queued rather than refused as "swept"
+T22D=$(NOTMUX send --me claude-evB --to claude-evA --kind notify --body "outage" 2>&1; echo "rc=$?")
+echo "$T22D" | grep -q 'rc=0' && ok "T22c send during an outage is not refused" || bad "T22c send spuriously swept ($T22D)"
+
+# --- T22d unknown liveness must not shelter a non-tmux corpse ---
+# The other half of the tri-state: an agent registered with a native pid and NO
+# pane was never in tmux, so tmux being unreachable says nothing about it and its
+# dead pid is the whole truth. Treating that as "unknown" would make such rows
+# permanently unsweepable. One sweep proves both halves: the corpse is condemned
+# while the tmux agent beside it survives the very same unreachable tmux.
+# env -u TMUX_PANE: the harness itself runs inside a pane, and register would
+# otherwise anchor the corpse to it -- making it a tmux agent, not the pane-less
+# case under test. --pid is a pid high enough that nothing can hold it.
+env -u TMUX_PANE node "$BUS_BIN" register --me shell-corpse --kind shell --pid 4294967 --name corpse >/dev/null
+chk "T22d a pane-less agent registers with no pane" \
+  "$(BUS list --all --json | J 'd.agents.find(a=>a.agent_id=="shell-corpse").pane')" ""
+SWD=$(NOTMUX sweep)
+# dead[], specifically -- matching anywhere in the payload would also accept the
+# unknown[] bucket, i.e. the exact sheltering this case exists to catch.
+chk "T22d dead non-tmux agent is swept even when tmux is unreachable" \
+  "$(printf '%s' "$SWD" | J 'd.dead.join(",")')" "shell-corpse"
+chk "T22d the tmux agent still survives that same sweep" \
+  "$(BUS list --all --json | J 'd.agents.find(a=>a.agent_id=="claude-evA").status')" "live"
+
 echo ""
 echo "== $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

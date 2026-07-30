@@ -1,7 +1,7 @@
 // Queue operations on the `messages` table (agent-agnostic).
 // Delivery (durable INSERT) is separate from notification (best-effort doorbell).
 import { openDb } from "./db.mjs";
-import { resolvePaneByPid, sendKeysSentinel, agentAlive, liveLocation, reanchor } from "./identity.mjs";
+import { resolvePaneByPid, sendKeysSentinel, agentLiveness, liveLocation, reanchor } from "./identity.mjs";
 import { readFileSync } from "node:fs";
 
 // Fixed wake sentinel. The adapter's UserPromptSubmit hook recognizes it and
@@ -35,9 +35,50 @@ export function selfFlag(opts) {
   return opts.me ?? opts.from ?? opts.id;
 }
 
+// The agent_id tier of a global identity -- an id that means the same agent from
+// anywhere, unlike the tmux-location tiers (name/window/session:window) that are
+// only meaningful relative to a caller. Accepts the id itself or the bare Claude
+// session id behind it, since the adapter registers agent_id = claude-<session_id>.
+// Shared by outbound --to (resolveTarget) and inbound --me (selfId) so one string
+// cannot name two different mailboxes depending on which flag carried it.
+// Two primary-key seeks in tier order rather than one OR'd SELECT: an exact
+// agent_id must outrank the prefixed form, and the hot path (hooks always pass an
+// exact agent_id) must never degrade into a table scan.
+function globalIdMatch(db, token) {
+  const q = db.prepare("SELECT agent_id FROM agents WHERE agent_id = ?");
+  const hit = q.get(token) ?? q.get(`claude-${token}`);
+  return hit?.agent_id ?? null;
+}
+
 export function selfId(db, explicit) {
-  const id = explicit ?? process.env.BUS_AGENT_ID;
-  if (id) return id;
+  const raw = explicit ?? process.env.BUS_AGENT_ID;
+  if (raw) {
+    // Resolve through the registry instead of trusting the string. It used to be
+    // the mailbox key VERBATIM, so `--me <session-id>` -- the form --to resolves
+    // fine -- addressed a mailbox that did not exist and every read returned
+    // {"ok":true,"messages":[]}.
+    const byId = globalIdMatch(db, raw);
+    if (byId) return byId;
+    // Then instance_id (a Claude session id). Not scoped to status='live': a
+    // finished agent must still be able to inspect its own mailbox. Ambiguity is
+    // an error rather than a newest-wins guess -- silently picking one of two
+    // mailboxes is the failure this function exists to eliminate.
+    const byInstance = db.prepare("SELECT agent_id FROM agents WHERE instance_id = ?").all(raw);
+    if (byInstance.length === 1) return byInstance[0].agent_id;
+    if (byInstance.length > 1) {
+      throw new Error(
+        `ambiguous identity '${raw}' -> ${byInstance.map((r) => r.agent_id).join(", ")}; ` +
+          "name yourself by agent_id",
+      );
+    }
+    // Deliberately fatal. An unresolvable self-identity previously degraded to an
+    // empty mailbox, which is indistinguishable from "no mail" -- the failure
+    // mode that made a working bus look broken.
+    throw new Error(
+      `unknown identity '${raw}' -- no registered agent has this agent_id or instance id ` +
+        "(--me/$BUS_AGENT_ID takes an agent_id or a Claude session id; `bus list --all` shows the registry)",
+    );
+  }
   const pane = process.env.TMUX_PANE;
   if (pane) {
     const row = db
@@ -45,7 +86,33 @@ export function selfId(db, explicit) {
       .get(pane);
     if (row) return row.agent_id;
   }
+  // Null, NOT a throw: plenty of legitimate callers run from a pane that is not
+  // itself a registered agent (a plain shell doing `bus list`, `bus doorbell`).
+  // Those degrade gracefully; the commands that genuinely need a mailbox
+  // (inbox/claim/drain) raise their own error via requireSelf. Only an
+  // EXPLICITLY asserted identity is fatal above -- the caller named an agent, so
+  // naming one that does not exist is a mistake worth stopping on.
   return null;
+}
+
+// selfId for the mailbox commands, where having no identity is fatal. Separates
+// "you never told me who you are" from "your pane isn't a registered agent" --
+// one message used to cover both and blamed the environment for either, which
+// sent a real investigation chasing tmux env inheritance for its first hour.
+function requireSelf(db, explicit, label) {
+  const me = selfId(db, explicit);
+  if (me) return me;
+  const pane = process.env.TMUX_PANE;
+  if (pane) {
+    throw new Error(
+      `${label}: no live agent registered for pane ${pane} -- this session may not have ` +
+        "registered yet (run `bus register`, or pass --me <agent_id>); `bus list --all` shows the registry",
+    );
+  }
+  throw new Error(
+    `${label}: no identity -- $BUS_AGENT_ID and $TMUX_PANE are both unset and no --me was given ` +
+      "(pass --me <agent_id|session-id>, or run from a registered tmux pane)",
+  );
 }
 
 // Non-negative integer if the string is a plain decimal index, else null (for
@@ -156,8 +223,8 @@ function liveRows(db) {
 export function resolveTarget(db, target, cmd = "send", sessionName = null) {
   if (!target) throw new Error(`${cmd}: --to <name|agent_id|window> is required`);
 
-  const byId = db.prepare("SELECT agent_id FROM agents WHERE agent_id = ?").get(target);
-  if (byId) return byId.agent_id;
+  const byId = globalIdMatch(db, target);
+  if (byId) return byId;
 
   const rows = liveRows(db);
   const ambiguous = (cand) => {
@@ -299,8 +366,11 @@ export function send(opts) {
     // Sweep-on-send: verify the target is still alive so we never queue mail to
     // a corpse and never report a dead agent as a live target (a live pane id
     // can be a respawn with a different pid, so check even when loc resolved).
-    // --no-verify skips.
-    if (!opts["no-verify"] && target && !agentAlive(target.row.pid)) {
+    // --no-verify skips. Only an explicit false refuses: when tmux is unreachable
+    // the verdict is null (unknown), and refusing then produced spurious
+    // "no longer live (swept)" errors against agents that were running fine.
+    // Unknown favours delivery -- the message is durable and waits in the mailbox.
+    if (!opts["no-verify"] && target && agentLiveness(target.row) === false) {
       db.prepare("UPDATE agents SET status = 'dead' WHERE agent_id = ?").run(to_agent);
       throw new Error(`send: target '${to_agent}' is no longer live (swept)`);
     }
@@ -368,28 +438,53 @@ export function reply(opts) {
 // Stop/doorbell drain. Pass --peek for a read-only look that leaves mail for the
 // drain. A non-default --status view is always read-only (only 'new' mail is
 // consumable; claimed/done/failed are terminal-ish and just inspected).
+// Returns { messages, hint }: hint is non-null only for an empty read, and says
+// why it was empty (see emptyHint) -- rendering is the caller's business.
 export function inbox(opts = {}) {
   const status = opts.status ?? "new";
   const db = openDb({ create: true });
   try {
-    const me = selfId(db, selfFlag(opts));
-    if (!me) throw new Error("inbox: no identity ($BUS_AGENT_ID / $TMUX_PANE unset, no --me)");
+    const me = requireSelf(db, selfFlag(opts), "inbox");
+    let rows;
     if (status === "new" && !opts.peek) {
       // UPDATE...RETURNING order isn't guaranteed; sort by id for a total order.
-      return db
+      rows = db
         .prepare(
           "UPDATE messages SET status = 'done', claimed_at = :now " +
             "WHERE to_agent = :me AND status = 'new' RETURNING *",
         )
         .all({ now: now(), me })
         .sort((a, b) => a.id - b.id);
+    } else {
+      rows = db
+        .prepare("SELECT * FROM messages WHERE to_agent = ? AND status = ? ORDER BY id")
+        .all(me, status);
     }
-    return db
-      .prepare("SELECT * FROM messages WHERE to_agent = ? AND status = ? ORDER BY id")
-      .all(me, status);
+    return { messages: rows, hint: rows.length === 0 ? emptyHint(db, me, status) : null };
   } finally {
     db.close();
   }
+}
+
+// Why an empty mailbox is empty. A bare `[]` reads as "my mail was lost", which
+// is exactly how a healthy bus got diagnosed as broken: the drain hooks consume
+// mail (new->done) BEFORE the agent's first tool call, so an empty inbox on a
+// <<bus>> turn is what success looks like -- the content is already in context.
+// Names the resolved identity too, so a wrong --me is visible at a glance.
+function emptyHint(db, me, status) {
+  const counts = db
+    .prepare("SELECT status, count(*) c FROM messages WHERE to_agent = ? GROUP BY status")
+    .all(me);
+  if (!counts.length) return `no mail has ever been addressed to '${me}'`;
+  const summary = counts.map((r) => `${r.c} ${r.status}`).join(", ");
+  const drained = counts.some((r) => r.status === "done");
+  return (
+    `no '${status}' mail for '${me}' (mailbox holds: ${summary})` +
+    (drained
+      ? " -- if a <<bus>> marker just fired, the Stop/UserPromptSubmit hook already" +
+        " drained it into this turn's context; re-read it with --status done or `bus show <id>`"
+      : "")
+  );
 }
 
 // Read a single message by id (read-only; no claim/ack). Returns the row or null.
@@ -460,8 +555,7 @@ export function prune(opts = {}) {
 function takeNew(opts, toStatus, label) {
   const db = openDb({ create: true });
   try {
-    const me = selfId(db, selfFlag(opts));
-    if (!me) throw new Error(`${label}: no identity ($BUS_AGENT_ID / $TMUX_PANE unset, no --me)`);
+    const me = requireSelf(db, selfFlag(opts), label);
     return db
       .prepare(
         `UPDATE messages SET status = '${toStatus}', claimed_at = :now ` +

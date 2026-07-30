@@ -15,6 +15,8 @@ best-effort wake. Run `bus` in your shell.
 Identity is automatic: with `$BUS_AGENT_ID` unset, `bus` self-locates your
 `agent_id` from `$TMUX_PANE` (the SessionStart export never reaches your tool
 shell). So `send`/`reply`/`inbox` need no `--from`/`--me`; `bus whoami` confirms.
+If you do pass `--me`, an `agent_id` or a bare Claude session id both work, and an
+identity matching no registered agent is a hard error — never a silent empty read.
 
 ## Subcommands
 
@@ -25,6 +27,13 @@ shell). So `send`/`reply`/`inbox` need no `--from`/`--me`; `bus whoami` confirms
 - **`/bus inbox`** → `bus inbox` — read + consume your new mail (auto-acks
   `new`→`done`, so the Stop/doorbell drain won't re-deliver it). Add `--peek` for a
   read-only look that leaves mail for the drain.
+  - **`--peek` means "don't consume", NOT "all statuses".** It still filters
+    `--status` (default `new`). To see already-delivered mail: `--status done`.
+  - **An empty inbox right after a `<<bus>>` marker is normal, not a lost message.**
+    The drain hook consumes your mail *before* your first tool call and injects it
+    into that turn as the `[tmux-message-bus]` block — so reading it again finds
+    nothing. The content is already in your context; scroll up rather than
+    re-querying. `bus show <id>` / `--status done` re-read it if needed.
 - **`/bus send <target> <message>`** → `bus send --to <target> --body <message> --doorbell`
   Durable INSERT + doorbell. `--kind request|delegate` for an ask; `--subject`.
   `<target>` resolves: `agent_id` (global) → Claude **session id** (global) →

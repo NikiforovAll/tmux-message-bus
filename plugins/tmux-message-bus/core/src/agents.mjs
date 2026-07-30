@@ -1,6 +1,6 @@
 // Registry operations on the `agents` table (agent-agnostic).
 import { openDb } from "./db.mjs";
-import { tmuxContext, agentAlive, reanchor } from "./identity.mjs";
+import { tmuxContext, agentLiveness, reanchor } from "./identity.mjs";
 import { selfFlag, toInt } from "./messages.mjs";
 
 // Claimed messages older than this are presumed orphaned by a crashed drain
@@ -15,6 +15,17 @@ function now() {
 // mutable location (pid/pane/window/session/cwd) + last_seen are refreshed, and
 // status is reset to 'live'. Called from the adapter's SessionStart and on each
 // drain as a cheap liveness touch.
+//
+// Location columns are COALESCEd, not overwritten: tmuxContext() returns null on
+// ANY tmux failure (including a transient socket timeout), and this runs on every
+// Stop and every doorbell turn. Overwriting unconditionally meant one flaky
+// `tmux display` permanently erased a live agent's pid/pane -- after which
+// agentLiveness can never say true, so the agent was swept and became
+// unaddressable while still running. Keep the last known-good anchor instead.
+// cwd is not coalesced because it cannot be null (line below falls back to
+// process.cwd()), so COALESCE would be a no-op. Handy side effect: its shape --
+// Windows 'C:\...' from process.cwd() vs MSYS '/c/...' from tmux -- is the
+// fingerprint for "this row was registered while tmux was unreachable".
 export function register(opts) {
   const agent_id = selfFlag(opts) || process.env.BUS_AGENT_ID;
   if (!agent_id) {
@@ -52,11 +63,11 @@ export function register(opts) {
          agent_kind   = excluded.agent_kind,
          instance_id  = COALESCE(excluded.instance_id, agents.instance_id),
          name         = COALESCE(excluded.name, agents.name),
-         pid          = excluded.pid,
-         pane         = excluded.pane,
-         window       = excluded.window,
-         window_name  = excluded.window_name,
-         session_name = excluded.session_name,
+         pid          = COALESCE(excluded.pid, agents.pid),
+         pane         = COALESCE(excluded.pane, agents.pane),
+         window       = COALESCE(excluded.window, agents.window),
+         window_name  = COALESCE(excluded.window_name, agents.window_name),
+         session_name = COALESCE(excluded.session_name, agents.session_name),
          cwd          = excluded.cwd,
          last_seen    = excluded.last_seen,
          status       = 'live'`,
@@ -96,17 +107,27 @@ export function list(opts = {}) {
   }
 }
 
-// Mark agents dead whose pid is gone, and requeue messages orphaned by a
-// crashed drain (claimed too long ago). Idempotent; safe to run often.
+// Mark agents dead whose pid is provably gone, and requeue messages orphaned by
+// a crashed drain (claimed too long ago). Idempotent; safe to run often. Agents
+// whose liveness is UNKNOWN (tmux unreachable) are returned in `unknown` and
+// left live -- being unable to ask is not evidence of death.
 export function sweep(opts = {}) {
   const staleMs = opts["stale-ms"] != null ? toInt(opts["stale-ms"], "sweep: --stale-ms") : STALE_CLAIM_MS;
   const dryRun = !!opts["dry-run"];
   const db = openDb({ create: true });
   try {
-    const live = db.prepare("SELECT agent_id, pid FROM agents WHERE status = 'live'").all();
+    // pane comes along because liveness reads it: a row with no pane was never
+    // in tmux, so tmux being unreachable tells us nothing about it either way.
+    const live = db.prepare("SELECT agent_id, pid, pane FROM agents WHERE status = 'live'").all();
     const dead = [];
+    const unknown = [];
     for (const a of live) {
-      if (!agentAlive(a.pid)) dead.push(a.agent_id);
+      // Only an explicit false condemns a row. A null verdict means tmux never
+      // answered -- sweeping on that once marked every live agent dead in a
+      // single pass, so unknown rows are reported and left alone.
+      const verdict = agentLiveness(a);
+      if (verdict === false) dead.push(a.agent_id);
+      else if (verdict === null) unknown.push(a.agent_id);
     }
     const cutoff = now() - staleMs;
 
@@ -116,7 +137,7 @@ export function sweep(opts = {}) {
     // --dry-run: report what WOULD change (counts + ids) without mutating.
     if (dryRun) {
       const requeued = db.prepare(`SELECT id FROM messages WHERE ${ORPHANED}`).all(cutoff);
-      return { dryRun: true, dead, requeued: requeued.map((r) => r.id) };
+      return { dryRun: true, dead, unknown, requeued: requeued.map((r) => r.id) };
     }
 
     const markDead = db.prepare("UPDATE agents SET status = 'dead' WHERE agent_id = ?");
@@ -126,7 +147,7 @@ export function sweep(opts = {}) {
       .prepare(`UPDATE messages SET status = 'new', claimed_at = NULL WHERE ${ORPHANED} RETURNING id`)
       .all(cutoff);
 
-    return { dead, requeued: requeued.map((r) => r.id) };
+    return { dead, unknown, requeued: requeued.map((r) => r.id) };
   } finally {
     db.close();
   }
