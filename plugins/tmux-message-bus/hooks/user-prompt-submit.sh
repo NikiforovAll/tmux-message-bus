@@ -5,8 +5,7 @@
 # number of stacked sentinels coalesce to one drain (claim takes all). A normal
 # prompt without the sentinel passes through untouched.
 set -uo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$DIR/lib.sh"
+. "${BASH_SOURCE[0]%/*}/lib.sh"
 
 read_payload
 init_agent_id

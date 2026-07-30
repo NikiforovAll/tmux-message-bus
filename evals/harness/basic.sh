@@ -211,12 +211,24 @@ SKIND=$(BUS show "$SID2" | J 'd.message.kind')
 chk "T17 envelope(stdin) + CLI flag override" "$SKIND" "request"
 
 # --- T18 injected frame carries reply/envelope hint, emitted once ---
-INJ=$(BUS claim --me claude-evCR | node "$(wpath "$H/format-inject.mjs")" Stop)
-# Single-emission contract: Stop injects via hookSpecificOutput.additionalContext,
-# never {decision:"block"} -- the block form is surfaced twice by the harness.
+# Drive the real hook, not format-inject.mjs directly: that is what puts the
+# shared emit_drain path under test. Single-emission contract: both drain hooks
+# inject via hookSpecificOutput.additionalContext and never {decision:"block"},
+# which the harness surfaces twice.
+HOOK() { CLAUDE_PROJECT_DIR="$REPO" TMUX_PANE="$1" BUS_BIN="$BUS_BIN" \
+  bash -c 'printf "%s" '"'$3'"' | bash "'"$H"'/'"$2"'"'; }
+INJ=$(HOOK "$PANE_CR" stop.sh '{"session_id":"evCR","stop_hook_active":false}')
 chk "T18 stop injects as Stop additionalContext" \
   "$(printf '%s' "$INJ" | J 'd.hookSpecificOutput.hookEventName')" "Stop"
 chk "T18 stop emits no block decision" "$(printf '%s' "$INJ" | J 'd.decision===undefined')" "true"
+chk "T18 drained inbox makes the next stop silent" \
+  "$(HOOK "$PANE_CR" stop.sh '{"session_id":"evCR","stop_hook_active":false}')" ""
+BUS_AGENT_ID="claude-evCS" BUS send --to bushopper --kind notify --body "doorbell-body" >/dev/null
+chk "T18 doorbell injects as UserPromptSubmit additionalContext" \
+  "$(HOOK "$PANE_CR" user-prompt-submit.sh '{"session_id":"evCR","prompt":"<<bus>>"}' | J 'd.hookSpecificOutput.hookEventName')" \
+  "UserPromptSubmit"
+chk "T18 ordinary prompt injects nothing" \
+  "$(HOOK "$PANE_CR" user-prompt-submit.sh '{"session_id":"evCR","prompt":"hello"}')" ""
 FRAMED=$(printf '%s' "$INJ" | J 'd.hookSpecificOutput.additionalContext')
 echo "$FRAMED" | grep -q 'bus reply --to-msg' && ok "T18 frame includes reply hint" || bad "T18 frame missing reply hint"
 echo "$FRAMED" | grep -q -- '--envelope' && ok "T18 frame nudges envelope" || bad "T18 frame missing envelope nudge"

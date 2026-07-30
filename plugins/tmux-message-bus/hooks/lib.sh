@@ -2,8 +2,10 @@
 # Plain ASCII; Git Bash / MSYS2 first-class.
 
 # This file's own directory, so helpers can reach sibling scripts without each
-# hook having to pass its $DIR down.
-HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# hook having to pass its $DIR down. Parameter expansion, not `cd ... && pwd`:
+# this runs on every hook invocation, and a subshell fork is the expensive
+# primitive on Git Bash/Windows.
+HOOK_DIR="${BASH_SOURCE[0]%/*}"
 
 # Resolve the agent-agnostic core `bus` CLI, in priority order:
 #   1. $BUS_BIN                              explicit override (executable, or a
@@ -79,19 +81,14 @@ drain_registered() {
     --name "$(basename "${CLAUDE_PROJECT_DIR:-$PWD}")"
 }
 
-# Drain the mailbox and emit the framed batch as $1's additionalContext (the
-# hook event name: Stop, UserPromptSubmit). Both drain paths are the same three
-# steps -- drain, frame, print -- and differ only in which event they answer, so
-# the sequence lives here once instead of in each hook.
+# Drain the mailbox and emit the framed batch as $1's additionalContext ($1 is
+# the hook event name: Stop, UserPromptSubmit). Shared so the two drain paths
+# cannot drift apart.
 #
-# Empty inbox -> no output. That is the loop guard on both paths: a Stop with
-# nothing to say lets the agent terminate, and a doorbell with nothing to
-# deliver leaves the prompt untouched. A failed drain is silent too (bus errors
-# must never break a turn).
+# Empty inbox or failed drain -> no output, exit 0. That is the loop guard (a
+# Stop with nothing to say must let the agent terminate) and the blast shield
+# (a bus error must never break a turn).
 emit_drain() {
-  local drain inject
-  drain="$(drain_registered 2>/dev/null)" || return 0
-  inject="$(printf '%s' "$drain" | node_script "$HOOK_DIR/format-inject.mjs" "$1")"
-  [ -n "$inject" ] && printf '%s' "$inject"
+  drain_registered 2>/dev/null | node_script "$HOOK_DIR/format-inject.mjs" "$1"
   return 0
 }

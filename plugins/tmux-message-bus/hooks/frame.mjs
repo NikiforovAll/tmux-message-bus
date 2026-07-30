@@ -19,12 +19,9 @@ function renderOne(m, i) {
 }
 
 // Build the framed block for a batch of claimed messages. Preamble and reply
-// hint are ONE line each, because every delivery pays for them: the full
-// etiquette (provenance, reply protocol, envelope rules) already lives in the
-// /bus skill, so the frame carries only what the skill cannot supply
-// per-delivery -- the provenance verdict on *these* bodies and the #ids to
-// correlate a reply against. Both lines still carry the validated acceptance
-// shape, so reword them with care (see the load-bearing note above).
+// hint are ONE line each: the full etiquette already lives in the /bus skill, so
+// the frame carries only what the skill cannot supply per-delivery -- the
+// provenance verdict on *these* bodies and the #ids to reply against.
 export function frame(messages) {
   const n = messages.length;
   const header =
