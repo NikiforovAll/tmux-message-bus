@@ -55,7 +55,7 @@ PASS/FAIL vs. the case's criterion. Drop transcripts under
 
 To test injection while the receiver is *working* (not idle at the prompt):
 send without `--doorbell` while B has an active turn; B's Stop hook claims the
-mail and re-prompts via `decision:block`. Same grading.
+mail and re-prompts via Stop `additionalContext`. Same grading.
 
 ## Cleanup
 

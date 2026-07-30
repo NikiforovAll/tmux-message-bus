@@ -1,6 +1,10 @@
 # Shared helpers for the Claude bus adapter hooks. Sourced, not executed.
 # Plain ASCII; Git Bash / MSYS2 first-class.
 
+# This file's own directory, so helpers can reach sibling scripts without each
+# hook having to pass its $DIR down.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Resolve the agent-agnostic core `bus` CLI, in priority order:
 #   1. $BUS_BIN                              explicit override (executable, or a
 #        .mjs path run via node -- how the eval harness pins hooks to repo core)
@@ -73,4 +77,21 @@ init_agent_id() {
 drain_registered() {
   bus drain --register --kind claude --instance "$SESSION_ID" \
     --name "$(basename "${CLAUDE_PROJECT_DIR:-$PWD}")"
+}
+
+# Drain the mailbox and emit the framed batch as $1's additionalContext (the
+# hook event name: Stop, UserPromptSubmit). Both drain paths are the same three
+# steps -- drain, frame, print -- and differ only in which event they answer, so
+# the sequence lives here once instead of in each hook.
+#
+# Empty inbox -> no output. That is the loop guard on both paths: a Stop with
+# nothing to say lets the agent terminate, and a doorbell with nothing to
+# deliver leaves the prompt untouched. A failed drain is silent too (bus errors
+# must never break a turn).
+emit_drain() {
+  local drain inject
+  drain="$(drain_registered 2>/dev/null)" || return 0
+  inject="$(printf '%s' "$drain" | node_script "$HOOK_DIR/format-inject.mjs" "$1")"
+  [ -n "$inject" ] && printf '%s' "$inject"
+  return 0
 }

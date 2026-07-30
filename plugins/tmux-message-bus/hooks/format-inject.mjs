@@ -1,14 +1,22 @@
-// Reads `bus drain` JSON on stdin and emits the injection payload for the given
-// mode. The drain already resolved the rows (new->done) atomically, so there is
-// no ids file and no separate ack step. Empty inbox -> no output (Stop loop
-// guard / no-op doorbell).
+// Reads `bus drain` JSON on stdin and emits the injection payload for the hook
+// event named in argv[1] (Stop, UserPromptSubmit). The drain already resolved
+// the rows (new->done) atomically, so there is no ids file and no separate ack
+// step. Empty inbox -> no output (Stop loop guard / no-op doorbell).
 //
-//   mode "stop" -> {decision:"block", reason}            (re-prompts the agent)
-//   mode "ups"  -> {hookSpecificOutput:{hookEventName,    (injects as context
-//                    additionalContext}}                   on the doorbell turn)
+// Every event injects through `additionalContext` -- one shape, one emission.
+// Stop deliberately does NOT use {decision:"block"}: the harness surfaces that
+// form twice, so each inbound message cost 2x its size in the receiver's
+// context. See docs/DESIGN.md, "Why not decision:block".
 import { frame } from "./frame.mjs";
 
-const mode = process.argv[2];
+const EVENTS = new Set(["Stop", "UserPromptSubmit"]);
+const hookEventName = process.argv[2];
+// Explicit over a defaulting ternary: a mis-invoked third caller should fail
+// here, not silently emit a payload tagged with the wrong event.
+if (!EVENTS.has(hookEventName)) {
+  process.stderr.write(`format-inject: unknown hook event '${hookEventName}'\n`);
+  process.exit(1);
+}
 
 let s = "";
 process.stdin.on("data", (d) => (s += d)).on("end", () => {
@@ -20,15 +28,8 @@ process.stdin.on("data", (d) => (s += d)).on("end", () => {
   }
   if (!messages.length) process.exit(0);
 
-  const reason = frame(messages);
-  const out =
-    mode === "ups"
-      ? {
-          hookSpecificOutput: {
-            hookEventName: "UserPromptSubmit",
-            additionalContext: reason,
-          },
-        }
-      : { decision: "block", reason };
-  process.stdout.write(JSON.stringify(out));
+  const additionalContext = frame(messages);
+  process.stdout.write(
+    JSON.stringify({ hookSpecificOutput: { hookEventName, additionalContext } }),
+  );
 });

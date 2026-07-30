@@ -210,8 +210,14 @@ SID2=$(printf '%s' '{"to":"bushopper","kind":"notify","body":"via-stdin"}' | BUS
 SKIND=$(BUS show "$SID2" | J 'd.message.kind')
 chk "T17 envelope(stdin) + CLI flag override" "$SKIND" "request"
 
-# --- T18 injected frame carries reply/envelope hint ---
-FRAMED=$(BUS claim --me claude-evCR | node "$(wpath "$H/format-inject.mjs")" stop | J 'd.reason')
+# --- T18 injected frame carries reply/envelope hint, emitted once ---
+INJ=$(BUS claim --me claude-evCR | node "$(wpath "$H/format-inject.mjs")" Stop)
+# Single-emission contract: Stop injects via hookSpecificOutput.additionalContext,
+# never {decision:"block"} -- the block form is surfaced twice by the harness.
+chk "T18 stop injects as Stop additionalContext" \
+  "$(printf '%s' "$INJ" | J 'd.hookSpecificOutput.hookEventName')" "Stop"
+chk "T18 stop emits no block decision" "$(printf '%s' "$INJ" | J 'd.decision===undefined')" "true"
+FRAMED=$(printf '%s' "$INJ" | J 'd.hookSpecificOutput.additionalContext')
 echo "$FRAMED" | grep -q 'bus reply --to-msg' && ok "T18 frame includes reply hint" || bad "T18 frame missing reply hint"
 echo "$FRAMED" | grep -q -- '--envelope' && ok "T18 frame nudges envelope" || bad "T18 frame missing envelope nudge"
 
