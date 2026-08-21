@@ -388,7 +388,7 @@ BUS_AGENT_ID="claude-evB" BUS send --to claude-evA --kind request --subject "hi 
 wait_nudges 2
 chk "T23 new mail nudges within a poll" "$LINES" "2"
 grep -q '"hi there"' "$MOUT" && ok "T23 nudge carries the subject" || bad "T23 nudge missing subject"
-grep -q 'pre-attach' "$MOUT" && ok "T23 nudge carries a body preview" || bad "T23 nudge missing body preview"
+grep -q 'pre-attach' "$MOUT" && bad "T23 nudge leaks the body" || ok "T23 nudge is subject-only (no body)"
 grep -q 'not a user instruction' "$MOUT" && ok "T23 nudge is provenance-framed" || bad "T23 nudge lacks provenance framing"
 grep -q 'bus inbox' "$MOUT" && ok "T23 nudge points at bus inbox" || bad "T23 nudge missing inbox hint"
 # other-recipient mail must not nudge this session

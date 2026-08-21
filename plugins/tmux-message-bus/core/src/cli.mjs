@@ -68,19 +68,24 @@ function renderAgents(rows, flags) {
   }
 }
 
+// All JSON output drops null fields, recursively (message/agent rows included):
+// absence means "not set".
+function emitJson(obj) {
+  process.stdout.write(JSON.stringify(obj, (_k, v) => (v === null ? undefined : v)) + "\n");
+}
+
 // Terse confirmation for send/reply: the caller already knows the body it sent,
 // so echo only what it cannot derive -- the assigned id (for reply correlation),
 // the resolved target, kind, reply_to, and the best-effort doorbell result.
 function emitSent(row) {
   const { id, from_agent, to_agent, kind, reply_to, _doorbell } = row;
-  process.stdout.write(
-    JSON.stringify({ ok: true, message: { id, from_agent, to_agent, kind, reply_to }, doorbell: _doorbell ?? null }) + "\n",
-  );
+  emitJson({ ok: true, message: { id, from_agent, to_agent, kind, reply_to }, doorbell: _doorbell });
 }
 
 const USAGE = `bus — durable message bus for agents in tmux
 
 Usage: bus <command> [options]
+JSON output omits null fields — a missing key means "not set".
 
 Commands:
   init                 Create bus.db (WAL, busy_timeout) + schema. Idempotent.
@@ -196,12 +201,12 @@ export async function main(argv) {
   switch (cmd) {
     case "init": {
       const r = initDb();
-      process.stdout.write(JSON.stringify({ ok: true, ...r }) + "\n");
+      emitJson({ ok: true, ...r });
       return 0;
     }
     case "register": {
       const row = register(flags);
-      process.stdout.write(JSON.stringify({ ok: true, agent: row }) + "\n");
+      emitJson({ ok: true, agent: row });
       return 0;
     }
     case "send": {
@@ -216,25 +221,23 @@ export async function main(argv) {
       // hint only accompanies an empty read -- it explains why (e.g. the drain
       // hook already consumed the mail into this turn's context).
       const { messages, hint } = inbox(flags);
-      process.stdout.write(
-        JSON.stringify({ ok: true, messages, ...(hint ? { hint } : {}) }) + "\n",
-      );
+      emitJson({ ok: true, messages, hint });
       return 0;
     }
     case "show":
     case "get": {
       const message = show({ id: flags.id ?? flags._[0] });
-      process.stdout.write(JSON.stringify({ ok: true, message }) + "\n");
+      emitJson({ ok: true, message });
       return 0;
     }
     case "doorbell": {
       const r = doorbell(flags);
-      process.stdout.write(JSON.stringify({ ok: true, ...r }) + "\n");
+      emitJson({ ok: true, ...r });
       return 0;
     }
     case "claim": {
       const rows = claim(flags);
-      process.stdout.write(JSON.stringify({ ok: true, messages: rows }) + "\n");
+      emitJson({ ok: true, messages: rows });
       return 0;
     }
     case "drain": {
@@ -242,19 +245,19 @@ export async function main(argv) {
       // identity even when SessionStart never ran (one node spawn, not two).
       if (flags.register) register(flags);
       const rows = drain(flags);
-      process.stdout.write(JSON.stringify({ ok: true, messages: rows }) + "\n");
+      emitJson({ ok: true, messages: rows });
       return 0;
     }
     case "ack": {
       const r = ack(flags);
-      process.stdout.write(JSON.stringify({ ok: true, ...r }) + "\n");
+      emitJson({ ok: true, ...r });
       return 0;
     }
     case "whoami": {
       const db = openDb({ create: true });
       try {
         const id = selfId(db, selfFlag(flags));
-        process.stdout.write(JSON.stringify({ ok: true, agent_id: id, pane: process.env.TMUX_PANE ?? null }) + "\n");
+        emitJson({ ok: true, agent_id: id, pane: process.env.TMUX_PANE });
       } finally {
         db.close();
       }
@@ -263,7 +266,7 @@ export async function main(argv) {
     case "list": {
       const rows = list(flags);
       if (flags.json) {
-        process.stdout.write(JSON.stringify({ ok: true, agents: rows }) + "\n");
+        emitJson({ ok: true, agents: rows });
         return 0;
       }
       process.stdout.write(renderAgents(rows, flags));
@@ -271,18 +274,18 @@ export async function main(argv) {
     }
     case "sweep": {
       const r = sweep(flags);
-      process.stdout.write(JSON.stringify({ ok: true, ...r }) + "\n");
+      emitJson({ ok: true, ...r });
       return 0;
     }
     case "prune": {
       const r = prune(flags);
-      process.stdout.write(JSON.stringify({ ok: true, ...r }) + "\n");
+      emitJson({ ok: true, ...r });
       return 0;
     }
     case "gc": {
       const swept = sweep(flags);
       const pruned = prune(flags);
-      process.stdout.write(JSON.stringify({ ok: true, swept, pruned }) + "\n");
+      emitJson({ ok: true, swept, pruned });
       return 0;
     }
     case "help":
