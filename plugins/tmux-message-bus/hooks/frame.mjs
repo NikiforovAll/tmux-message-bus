@@ -28,11 +28,12 @@ export function frame(messages) {
   const header = `[tmux-message-bus] ${n} peer message${n === 1 ? "" : "s"}:`;
   const items = messages.map(renderOne).join("\n\n");
   // The footer is kind-aware: a request/delegate leaves the sender blocked, so
-  // hand over the reply mechanism; a notify/reply is terminal — offering the
-  // command there is what turns idle agents into ack-senders, so say nothing.
+  // hand over the reply mechanism; a notify/reply is terminal — the cheapest
+  // reaction is none at all, so tell the agent to end its turn with nothing:
+  // no bus reply, no acknowledgment prose to its user.
   const wantsReply = messages.some((m) => m.kind === "request" || m.kind === "delegate");
   const footer = wantsReply
     ? `\n\nSender awaits your reply: \`bus reply --to-msg <#id> --envelope -\`.`
-    : ``;
+    : `\n\nNo reply.`;
   return `${header}\n\n${items}${footer}`;
 }
