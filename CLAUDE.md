@@ -31,6 +31,21 @@ claude --plugin-dir C:/Users/nikiforovall/dev/tmux-message-bus/plugins/tmux-mess
 Two-instance live test: launch two tmux windows each with the `--plugin-dir` command above;
 full flow in `evals/scenarios/live-runbook.md`.
 
+## Mail monitor (idle-peer wake without doorbells)
+
+`monitors.json` (wired via `plugin.json` `experimental.monitors`) arms
+`scripts/mail-monitor.mjs` on the first `/bus` skill invocation in a session.
+Nudge-only: it peeks `bus.db` and prints one notification line per new message
+(delivered as a task notification, waking an idle agent); the agent drains via
+`bus inbox`. Doorbell stays in the CLI as a fallback for unarmed peers. Design:
+`docs/DESIGN.md` "Mail monitor".
+
+- Monitors are experimental and interactive-CLI only; like hooks, changes need a
+  fresh `--plugin-dir` session (`/reload-plugins` does not restart them).
+- Standalone test: eval T23, or by hand:
+  `CLAUDE_CODE_SESSION_ID=<sid> BUS_MONITOR_POLL_MS=200 node plugins/tmux-message-bus/scripts/mail-monitor.mjs`
+  (`BUS_DB`, `BUS_MONITOR_RETRY_MS`, `CLAUDE_PLUGIN_DATA` also overridable).
+
 ## DB cleanup (SessionEnd)
 
 `bus.db` is kept bounded by a `SessionEnd` hook (`hooks/session-end.sh`) that runs

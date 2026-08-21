@@ -1,0 +1,8 @@
+[
+  {
+    "name": "bus-mail",
+    "description": "Wakes this session when new bus mail arrives.",
+    "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/mail-monitor.mjs\"",
+    "when": "on-skill-invoke:tmux-message-bus:bus"
+  }
+]

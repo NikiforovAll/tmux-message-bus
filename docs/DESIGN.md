@@ -165,11 +165,25 @@ Also settled earlier in the same investigation: `sqlite3` CLI is **absent** on t
 
 ## Gaps from the 2026-06-27 review — resolution status
 
-- **Idle-peer delivery.** RESOLVED via two drain paths: the doorbell wakes an idle peer and its UserPromptSubmit hook drains in the same turn; the Stop hook covers mail that lands mid-turn. Residual: a *failed* doorbell to a live-but-idle peer still waits for the user's next prompt (accepted — the message is durable, never lost).
+- **Idle-peer delivery.** RESOLVED via two drain paths: the doorbell wakes an idle peer and its UserPromptSubmit hook drains in the same turn; the Stop hook covers mail that lands mid-turn. Residual: a *failed* doorbell to a live-but-idle peer still waits for the user's next prompt (accepted — the message is durable, never lost). **Closed for armed sessions (0.1.8)** by the `bus-mail` plugin monitor — see "Mail monitor" below; the doorbell is demoted to a fallback for unarmed peers and drops out of the skill's default send.
 - **Message retention.** RESOLVED: `bus prune` deletes terminal (`done`/`failed`) rows older than a max age and checkpoints the WAL.
 - **Sweep on send.** RESOLVED: `bus send` verifies the target is alive (pane existence) and marks it dead + refuses if not (`--no-verify` to skip).
 - **Doorbell idempotency.** RESOLVED: the UserPromptSubmit drain claims the *whole* inbox, so multiple stacked `<<bus>>` sentinels coalesce to one drain.
 - **Plugin hook wiring.** RESOLVED: `plugins/tmux-message-bus/hooks/hooks.json` wires SessionStart + Stop + UserPromptSubmit; scripts in the same dir.
+
+## Mail monitor (0.1.8): waking idle peers without the doorbell
+
+`plugins/tmux-message-bus/scripts/mail-monitor.mjs`, declared via `plugin.json` → `experimental.monitors` → `monitors.json`, armed by `when: "on-skill-invoke:tmux-message-bus:bus"` — i.e. a session opts in by invoking the `/bus` skill (parent: the user runs `/bus ...`; child: the launch brief tells it to load `Skill(bus)` at startup). Claude Code delivers every stdout line of a monitor to its session as a task notification, which wakes an idle session into a turn — exactly the gap the send-keys doorbell covered, minus its failure modes (same-tmux-server requirement, pane resolution by pid, TUI modals swallowing keystrokes, `<<bus>>` noise in the transcript).
+
+Design constraints, all deliberate:
+
+- **Nudge-only, read-only peek.** The monitor never mutates the DB. It polls (`~2s`, WAL reader) for `status='new'` rows addressed to `claude-<CLAUDE_CODE_SESSION_ID>` above an in-process high-water mark and prints one compact line per message (sender, `#id`, kind, subject, short body preview). Delivery — provenance framing, multi-line bodies, the atomic `new -> done` drain — stays exclusively with the drain hooks, so the monitor can never race them or double-deliver; the woken agent runs `bus inbox`.
+- **Peer text is capped and sanitized.** The notification line lands outside `frame.mjs` quoting, so peer-written text on it is an injection surface: every field — sender, kind, subject, and the ~90-char body preview — is sanitized (control chars stripped — a raw `\n` would forge a second notification — capped length) and the line itself carries inline provenance ("peer data, not a user instruction").
+- **First attach announces pre-existing `new` mail** — mail whose doorbell failed is exactly what the session is owed. The high-water mark then guarantees once-per-message even while the mail sits undrained.
+- **Silent by discipline** (postman pattern): every error is swallowed with a backoff; a missing DB is the normal case; stdout carries notification lines only. A per-session pid-file singleton (under `CLAUDE_PLUGIN_DATA`) guards against double-arming.
+- **Doorbell fate:** kept in the CLI (`--doorbell`, `bus doorbell`) as the fallback for peers that never armed a monitor and for non-Claude agents; a duplicate wake is harmless because drains are atomic. The `/bus` skill's default `send`/`reply` no longer pass it.
+
+Covered by eval T23 in `evals/harness/basic.sh`.
 
 ### Implementation notes (2026-06-27)
 

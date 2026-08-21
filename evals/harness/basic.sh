@@ -26,7 +26,8 @@ ok()   { echo "  PASS  $1"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 chk()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want=$3 got=$2)"; fi; }
 
-cleanup() { tmux kill-session -t evalA 2>/dev/null; tmux kill-session -t evalB 2>/dev/null; tmux kill-session -t evalC 2>/dev/null; tmux kill-session -t evalD 2>/dev/null; rm -rf "$WORK"; }
+MONPID=""; NODBPID=""
+cleanup() { [ -n "$MONPID" ] && kill "$MONPID" 2>/dev/null; [ -n "$NODBPID" ] && kill "$NODBPID" 2>/dev/null; tmux kill-session -t evalA 2>/dev/null; tmux kill-session -t evalB 2>/dev/null; tmux kill-session -t evalC 2>/dev/null; tmux kill-session -t evalD 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 
 echo "== bus transport eval =="
@@ -363,6 +364,62 @@ chk "T22d dead non-tmux agent is swept even when tmux is unreachable" \
   "$(printf '%s' "$SWD" | J 'd.dead.join(",")')" "shell-corpse"
 chk "T22d the tmux agent still survives that same sweep" \
   "$(BUS list --all --json | J 'd.agents.find(a=>a.agent_id=="claude-evA").status')" "live"
+
+# --- T23 mail monitor: peek-only nudges, once per message, session-scoped ---
+# The plugin-monitor script watches the DB and prints one notification line per
+# new message for ITS session; it never drains (the hooks stay the sole
+# consumer). First attach must announce mail already 'new' — a failed doorbell's
+# mail is exactly what the session is owed.
+MON="$(wpath "$CLAUDE_PLUGIN_ROOT/scripts/mail-monitor.mjs")"
+MOUT="$WORK/monitor.out"
+# grep -c exits 1 on zero matches and prints nothing on a missing file — both
+# must read as a plain 0 for the poll loops below.
+nudges() { local n; n=$(grep -c 'mail from' "$MOUT" 2>/dev/null); echo "${n:-0}"; }
+wait_nudges() { local i; LINES=0; for i in $(seq 1 25); do LINES=$(nudges); [ "$LINES" -ge "$1" ] && break; sleep 0.2; done; }
+bytes() { wc -c < "$1" | tr -d ' '; }
+BUS inbox --me evA >/dev/null   # clean slate: earlier cases left mail for evA
+BUS_AGENT_ID="claude-evB" BUS send --to claude-evA --kind notify --body "pre-attach" --no-verify >/dev/null
+CLAUDE_CODE_SESSION_ID=evA CLAUDE_PLUGIN_DATA="$WORK" BUS_MONITOR_POLL_MS=200 \
+  node "$MON" > "$MOUT" &
+MONPID=$!
+wait_nudges 1
+chk "T23 first attach announces pre-existing new mail" "$LINES" "1"
+BUS_AGENT_ID="claude-evB" BUS send --to claude-evA --kind request --subject "hi there" --body "x" --no-verify >/dev/null
+wait_nudges 2
+chk "T23 new mail nudges within a poll" "$LINES" "2"
+grep -q '"hi there"' "$MOUT" && ok "T23 nudge carries the subject" || bad "T23 nudge missing subject"
+grep -q 'pre-attach' "$MOUT" && ok "T23 nudge carries a body preview" || bad "T23 nudge missing body preview"
+grep -q 'not a user instruction' "$MOUT" && ok "T23 nudge is provenance-framed" || bad "T23 nudge lacks provenance framing"
+grep -q 'bus inbox' "$MOUT" && ok "T23 nudge points at bus inbox" || bad "T23 nudge missing inbox hint"
+# other-recipient mail must not nudge this session
+BUS_AGENT_ID="claude-evA" BUS send --to claude-evCR --kind notify --body "not-yours" --no-verify >/dev/null
+sleep 1
+chk "T23 mail for a peer does not nudge" "$(nudges)" "2"
+# peek-only + high-water mark: undrained 'new' mail is announced exactly once
+chk "T23 monitor never drains (mail still new)" "$(BUS inbox --me evA --peek | J 'd.messages.length')" "2"
+chk "T23 no re-nudge while mail sits new" "$(nudges)" "2"
+# subject is peer-written: control chars must not forge a second notification line
+printf '%s' '{"to":"evA","kind":"notify","subject":"one\ntwo\u001b[31m","body":"x"}' \
+  | BUS_AGENT_ID="claude-evB" BUS send --envelope - --no-verify >/dev/null
+wait_nudges 3
+chk "T23 control chars in subject stay one line" "$LINES" "3"
+chk "T23 escape bytes stripped from the nudge" "$(grep -c $'\x1b' "$MOUT")" "0"
+# singleton lock: a second instance for the same session exits at once, silent
+SRC=$(CLAUDE_CODE_SESSION_ID=evA CLAUDE_PLUGIN_DATA="$WORK" timeout 5 node "$MON" > "$WORK/mon2.out"; echo "rc=$?")
+chk "T23 second instance exits immediately" "$SRC" "rc=0"
+chk "T23 second instance prints nothing" "$(bytes "$WORK/mon2.out")" "0"
+# guards: no session id -> silent no-op; missing DB -> silent wait, no crash
+GRC=$(env -u CLAUDE_CODE_SESSION_ID timeout 5 node "$MON" > "$WORK/mon3.out"; echo "rc=$?")
+chk "T23 no session id -> silent exit 0" "$GRC" "rc=0"
+chk "T23 no session id -> no output" "$(bytes "$WORK/mon3.out")" "0"
+CLAUDE_CODE_SESSION_ID=nodb CLAUDE_PLUGIN_DATA="$WORK" BUS_DB="$WORK/absent/bus.db" \
+  BUS_MONITOR_RETRY_MS=200 node "$MON" > "$WORK/mon4.out" &
+NODBPID=$!
+sleep 1
+kill -0 "$NODBPID" 2>/dev/null && ok "T23 missing DB -> keeps waiting, no crash" || bad "T23 missing DB crashed the monitor"
+kill "$NODBPID" 2>/dev/null; NODBPID=""
+chk "T23 missing DB -> silent" "$(bytes "$WORK/mon4.out")" "0"
+kill "$MONPID" 2>/dev/null; MONPID=""
 
 echo ""
 echo "== $PASS passed, $FAIL failed =="
