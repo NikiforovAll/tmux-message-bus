@@ -44,7 +44,7 @@ Prior art: *Tmux-Orchestrator* and *claude-squad* both rely on `send-keys` + raw
 
 ## Recommended architecture (locked)
 
-**Single SQLite-WAL DB (registry + queue) + Stop-hook drain + a sentinel `send-keys` doorbell.** No heavy CLI binary — a thin `bus` shell-helper layer + `sqlite3`, with agent-specific hooks on top.
+**Single SQLite-WAL DB (registry + queue) + Stop-hook drain + a sentinel `send-keys` doorbell.** (Historical: the doorbell was removed in 2.1.0 — see "Doorbell removed". Everything below describes the original decision.) No heavy CLI binary — a thin `bus` shell-helper layer + `sqlite3`, with agent-specific hooks on top.
 
 Guiding principle: **separate delivery from notification.** `INSERT` into the DB = durable delivery (cannot be lost). The doorbell is best-effort and only reduces latency. A garbled doorbell costs latency, not the message — the peer drains on its next turn regardless. Target: **at-least-once delivery, eventually consumed, totally ordered (by rowid).**
 
@@ -127,14 +127,14 @@ CREATE TABLE messages (
 
 ### Cross-session / cross-server
 
-The DB is pure filesystem on the local host -> messaging works across tmux windows, **sessions, and separate tmux servers**. Only the *doorbell* needs the same tmux server. Different server -> no instant wake; mail is drained on the peer's next turn. (SQLite WAL requires same host — fine here; never put `bus.db` on a network share.)
+The DB is pure filesystem on the local host -> messaging works across tmux windows, **sessions, and separate tmux servers**. Since 2.1.0 the wake path is receiver-local too (each session's own mail monitor polls `bus.db`), so an armed peer gets an instant wake regardless of which tmux server it lives on; an unarmed peer drains on its next turn. (SQLite WAL requires same host — fine here; never put `bus.db` on a network share.)
 
 ## Repo layout
 
 This project is independent of the `tmux` Claude plugin. Everything bus-related lives here; even the Claude adapter installs separately, via this repo's own marketplace (standard Claude plugin layout: root `.claude-plugin/marketplace.json` -> `plugins/<name>/.claude-plugin/plugin.json`).
 
-- **`core/`** = the agent-agnostic bus: `bus.db`, schema, `bus` shell helpers (`register`/`list`/`send`/`claim`/`ack`/`sweep`/`doorbell`). No Claude knowledge. Not a plugin.
-- **`plugins/tmux-message-bus/`** = the Claude adapter plugin: `hooks/` (SessionStart register + Stop-hook drain with `additionalContext` injection), `BUS_AGENT_ID` seeded from `session_id`, doorbell sentinel config, and a `/bus` skill. Installed as its own plugin from this repo's marketplace, separate from the `tmux` plugin.
+- **`plugins/tmux-message-bus/core/`** = the agent-agnostic bus: `bus.db`, schema, and the `bus` Node CLI (`register`/`list`/`send`/`reply`/`inbox`/`drain`/`claim`/`ack`/`show`/`sweep`/`prune`/`gc`/`whoami`). No Claude knowledge. It lives *inside* the plugin so a marketplace install, which copies only the plugin dir, still ships it.
+- **`plugins/tmux-message-bus/`** = the Claude adapter plugin: `hooks/` (SessionStart register, Stop drain with `additionalContext` injection, the UserPromptSubmit legacy-sentinel shim, SessionEnd gc), `monitors.json` + `scripts/mail-monitor.mjs` (the wake path), `BUS_AGENT_ID` seeded from `session_id`, and a `/bus` skill. Installed as its own plugin from this repo's marketplace, separate from the `tmux` plugin.
 - The `tmux` plugin (`/tmux`, `/tmux-claude`) stays generic and no longer carries any message-bus code. Its old send-keys `tmux-message-bus` skill is retired in favour of this repo.
 
 ## Phased plan
@@ -168,8 +168,8 @@ Also settled earlier in the same investigation: `sqlite3` CLI is **absent** on t
 - **Idle-peer delivery.** RESOLVED via two drain paths: the doorbell wakes an idle peer and its UserPromptSubmit hook drains in the same turn; the Stop hook covers mail that lands mid-turn. Residual: a *failed* doorbell to a live-but-idle peer still waits for the user's next prompt (accepted — the message is durable, never lost). **Closed for armed sessions (0.1.8)** by the `bus-mail` plugin monitor — see "Mail monitor" below; the doorbell is demoted to a fallback for unarmed peers and drops out of the skill's default send.
 - **Message retention.** RESOLVED: `bus prune` deletes terminal (`done`/`failed`) rows older than a max age and checkpoints the WAL.
 - **Sweep on send.** RESOLVED: `bus send` verifies the target is alive (pane existence) and marks it dead + refuses if not (`--no-verify` to skip).
-- **Doorbell idempotency.** RESOLVED: the UserPromptSubmit drain claims the *whole* inbox, so multiple stacked `<<bus>>` sentinels coalesce to one drain.
-- **Plugin hook wiring.** RESOLVED: `plugins/tmux-message-bus/hooks/hooks.json` wires SessionStart + Stop + UserPromptSubmit; scripts in the same dir.
+- **Legacy sentinel idempotency.** RESOLVED: the UserPromptSubmit drain claims the *whole* inbox, so multiple stacked `<<bus>>` sentinels coalesce to one drain. (Historical as a doorbell property; it now describes the 2.1.0 compatibility shim.)
+- **Plugin hook wiring.** RESOLVED: `plugins/tmux-message-bus/hooks/hooks.json` wires SessionStart + Stop + UserPromptSubmit + SessionEnd (gc); scripts in the same dir. The wake path is separate: `monitors.json` -> `scripts/mail-monitor.mjs`.
 
 ## Mail monitor (0.1.8): waking idle peers without the doorbell
 
@@ -179,18 +179,30 @@ Design constraints, all deliberate:
 
 - **Nudge-only, read-only peek.** The monitor never mutates the DB. It polls (`~2s`, WAL reader) for `status='new'` rows addressed to `claude-<CLAUDE_CODE_SESSION_ID>` above an in-process high-water mark and prints one compact line per message (sender, `#id`, kind, subject — never the body, which stays in the DB until drained). Delivery — provenance framing, multi-line bodies, the atomic `new -> done` drain — stays exclusively with the drain hooks, so the monitor can never race them or double-deliver; the woken agent runs `bus inbox`.
 - **Peer text is capped and sanitized.** The notification line lands outside `frame.mjs` quoting, so peer-written text on it is an injection surface: every field — sender, kind, subject — is sanitized (control chars stripped — a raw `\n` would forge a second notification — capped length) and the line itself carries inline provenance ("peer data, not a user instruction").
-- **First attach announces pre-existing `new` mail** — mail whose doorbell failed is exactly what the session is owed. The high-water mark then guarantees once-per-message even while the mail sits undrained.
-- **Silent by discipline** (postman pattern): every error is swallowed with a backoff; a missing DB is the normal case; stdout carries notification lines only. A per-session pid-file singleton (under `CLAUDE_PLUGIN_DATA`) guards against double-arming.
-- **Doorbell fate:** kept in the CLI (`--doorbell`, `bus doorbell`) as the fallback for peers that never armed a monitor and for non-Claude agents; a duplicate wake is harmless because drains are atomic. The `/bus` skill's default `send`/`reply` no longer pass it.
+- **First attach announces pre-existing `new` mail** — mail that landed while no monitor was armed is exactly what the session is owed. The high-water mark then guarantees once-per-message even while the mail sits undrained.
+- **Silent by discipline** (postman pattern): every error is swallowed with a backoff; a missing DB is the normal case; stdout carries notification lines only. A per-session lock file (under `CLAUDE_PLUGIN_DATA`) guards against double-arming.
+- **The singleton lock is a heartbeat, not a pid** (2.1.0). The lock file is never cleaned up on exit and `--resume` reuses the session id, so an old record is routinely consulted; once Windows recycles that pid onto any unrelated live process, `kill(pid, 0)` says "owner alive" and the real monitor exits, leaving the session with **no wake path at all**. Since the doorbell is gone that failure is total, so the asymmetry decides the design: a false positive costs every notification, a false negative costs one duplicate nudge. The owner therefore re-writes `{tag, sid, pid, beatAt}` on its own timer (`max(pollMs, 5s)`, deliberately independent of the poll so an error backoff cannot stall the beat), and a starting instance yields only to a record that is ours (tag + session), refreshed within three beats, **and** whose pid is live — liveness can only confirm a fresh heartbeat, never keep a stale record alive. A bare pid file from an older version reads as "not our record" and is taken over. Covered by eval T23b.
+- **Doorbell fate:** demoted to a fallback in 0.1.8, then **deleted in 2.1.0** — see "Doorbell removed" below.
 
 Covered by eval T23 in `evals/harness/basic.sh`.
+
+## Doorbell removed (2.1.0)
+
+The send-keys doorbell (`bus doorbell`, `send --doorbell`, `sendKeysSentinel`, the `<<bus>>` sentinel constant) is gone from the core. Delivery was never its job, and as a *notification* it was strictly worse than the monitor: it needed the same tmux server, resolved a pane by pid, lost keystrokes to TUI modals and permission prompts, and left literal `<<bus>>` prompts in the receiver's transcript. Once the monitor closed the idle-peer gap for armed sessions, keeping a keystroke-injecting fallback bought nothing but that noise — a peer that never armed a monitor still drains on its next Stop, because delivery is the `INSERT`.
+
+What remains of the sentinel path, deliberately:
+
+- `hooks/user-prompt-submit.sh` still recognizes `<<bus>>` and turns it into a real drain. It is now a **compatibility shim**, not a wake path: a peer running an older cached copy of the plugin can still type the sentinel into this pane, and swallowing it into a drain beats letting it land as a literal prompt. Retire it once no ≤2.0.x cached plugin is plausible on this host (target 2.3.0) — it is the last place `<<bus>>` is defined, so deleting it closes the sentinel out entirely.
+- `bus send --doorbell` and `bus doorbell` both fail loudly (non-zero, named error) rather than being silently ignored, so an old caller or stale skill text is visible instead of quietly not waking anyone.
+
+Wake path after this change: mail monitor (armed sessions) → Stop-hook drain (mid-turn mail, and every unarmed session's next turn) → `bus inbox` on demand. Covered by evals T7/T8 (no sentinel reaches a peer pane, retired flag rejected) and T18 (the shim still drains).
 
 ### Implementation notes (2026-06-27)
 
 - Core is a Node CLI (`plugins/tmux-message-bus/core/bin/bus.mjs`, `node:sqlite`), not shell+sqlite3 (no `sqlite3` on host). It is bundled inside the plugin so a marketplace install (which copies only the plugin dir) still ships it.
 - **Windows liveness**: tmux `#{pane_pid}` is a Cygwin pid; Node `process.kill` (Windows pids) can't see it, so liveness = a pane with that `pane_pid` still in `tmux list-panes -a` (fallback `process.kill` for non-tmux agents).
 - Adapter `agent_id = claude-<session_id>`; the core CLI is resolved by the hooks via `$CLAUDE_PLUGIN_ROOT/core/bin/bus.mjs` (bundled in the plugin → survives install), with a legacy `../../core` fallback, overridable with `$BUS_BIN`.
-- E2E: two agents in two tmux sessions exchanged a `request` + correlated `reply` through the real hook scripts — doorbell landed, both drained and acked.
+- E2E: two agents in two tmux sessions exchanged a `request` + correlated `reply` through the real hook scripts — both drained and acked.
 
 ## Sources
 Maildir https://cr.yp.to/proto/maildir.html · SQLite WAL https://www.sqlite.org/wal.html · AF_UNIX on Windows https://devblogs.microsoft.com/commandline/af_unix-comes-to-windows/ · tmux https://man.openbsd.org/tmux.1 · Prior art https://github.com/Jedward23/Tmux-Orchestrator , https://github.com/smtg-ai/claude-squad

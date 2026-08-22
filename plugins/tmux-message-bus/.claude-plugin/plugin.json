@@ -1,6 +1,6 @@
 {
   "name": "tmux-message-bus",
-  "version": "2.0.6",
+  "version": "2.1.0",
   "description": "Claude Code adapter for tmux-message-bus: durable cross-window/session messaging. SessionStart register hook + Stop/UserPromptSubmit drain (additionalContext injection) + bus-mail monitor that wakes idle sessions, on top of the agent-agnostic core bus.",
   "author": {
     "name": "Oleksii Nikiforov",

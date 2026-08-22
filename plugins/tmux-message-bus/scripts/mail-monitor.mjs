@@ -28,26 +28,71 @@ const DB_PATH = process.env.BUS_DB || join(homedir(), ".claude", "bus", "bus.db"
 const POLL_MS = Number(process.env.BUS_MONITOR_POLL_MS) || 2000;
 const RETRY_MS = Number(process.env.BUS_MONITOR_RETRY_MS) || 15000;
 
-// Singleton per session (monitors restart on plugin reload): a stale pid file
-// fails the kill(pid, 0) probe, so no cleanup is needed on exit.
-try {
-  const lockFile = join(
-    process.env.CLAUDE_PLUGIN_DATA || tmpdir(),
-    `bus-mail-monitor-${SESSION_ID}.pid`,
-  );
+// Singleton per session (monitors restart on plugin reload). The lock is a
+// heartbeat, not a bare pid: a pid alone is unsafe here because the file is
+// never cleaned up on exit and `--resume` reuses the session id, so an old
+// record is routinely consulted -- and once Windows recycles that pid onto any
+// unrelated live process, kill(pid, 0) says "owner alive" and the real monitor
+// exits, leaving the session with no wake path at all. A false positive costs
+// every notification; a false negative costs a duplicate nudge. So the owner
+// must keep proving it is alive, and a record nobody is refreshing is stale no
+// matter who holds the pid now.
+const LOCK_FILE = join(
+  process.env.CLAUDE_PLUGIN_DATA || tmpdir(),
+  `bus-mail-monitor-${SESSION_ID}.pid`,
+);
+const LOCK_TAG = "bus-mail-monitor";
+
+// Heartbeat cadence, deliberately independent of the poll: proving liveness is
+// not the poll's job, and a beat riding the loop would stall for a whole error
+// backoff. Grace is a plain multiple of the beat.
+const BEAT_MS = Math.max(POLL_MS, 5000);
+const STALE_MS = 3 * BEAT_MS;
+
+// Best-effort: an unwritable lock dir must not cost notifications, so a failure
+// here runs the monitor unlocked rather than exiting.
+function touchLock() {
   try {
-    const pid = Number(readFileSync(lockFile, "utf8").trim());
-    if (pid) {
-      process.kill(pid, 0); // throws if gone → lock is stale, take it
-      process.exit(0);
-    }
-  } catch (err) {
-    if (err && err.code === "EPERM") process.exit(0); // alive, other owner
+    writeFileSync(
+      LOCK_FILE,
+      JSON.stringify({ tag: LOCK_TAG, sid: SESSION_ID, pid: process.pid, beatAt: Date.now() }),
+    );
+  } catch {
+    /* unwritable -> run unlocked */
   }
-  writeFileSync(lockFile, String(process.pid));
-} catch {
-  // lock dir unwritable — run unlocked rather than lose notifications
 }
+
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === "EPERM"; // alive under another owner
+  }
+};
+
+let rec = null;
+try {
+  rec = JSON.parse(readFileSync(LOCK_FILE, "utf8"));
+} catch {
+  // Missing, unreadable, or a bare pid from <=2.1.0: no live claim to honour.
+  rec = null;
+}
+// Only a record this script wrote, for this session, that someone refreshed
+// within the grace window blocks a start. Liveness is the weaker of the two
+// checks (pid reuse, EPERM under another owner), so it only ever confirms a
+// fresh heartbeat -- it can never keep a stale record alive on its own.
+if (
+  rec &&
+  rec.tag === LOCK_TAG &&
+  rec.sid === SESSION_ID &&
+  Number(rec.beatAt) > Date.now() - STALE_MS &&
+  alive(Number(rec.pid))
+) {
+  process.exit(0);
+}
+touchLock();
+setInterval(touchLock, BEAT_MS).unref();
 
 // One-line invariant: control chars would let a peer-supplied field (subject,
 // but also from_agent/kind — senders self-assert identity) forge a second
@@ -64,7 +109,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // High-water mark: notify each message once, even if the agent stays busy and
 // the row sits in status='new' across many polls. In-process only — on monitor
 // restart pre-existing 'new' mail is announced again, which is the point: mail
-// whose doorbell failed is exactly what the session is owed.
+// that landed while the session had no monitor armed is exactly what it is owed.
 let lastNotified = 0;
 let db = null;
 let peek = null;

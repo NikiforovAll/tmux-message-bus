@@ -38,17 +38,6 @@ function tmux(args, retries = 1) {
   }
 }
 
-// Best-effort doorbell: send the fixed sentinel + Enter into a pane to make an
-// idle peer take a turn. Carries no content. -l sends the sentinel literally so
-// tmux key-name parsing never mangles it; a second send-keys delivers Enter.
-// Explicitly NOT retried: send-keys mutates the peer's input. A retry after keys
-// landed but the exec reported failure would inject the sentinel twice and cost
-// that peer an entire wasted turn -- worse than a missed best-effort doorbell.
-export function sendKeysSentinel(pane, sentinel) {
-  tmux(["send-keys", "-t", pane, "-l", sentinel], 0);
-  tmux(["send-keys", "-t", pane, "Enter"], 0);
-}
-
 // Current tmux context for $TMUX_PANE. Returns null when not inside tmux.
 export function tmuxContext(pane = process.env.TMUX_PANE) {
   if (!pane) return null;
@@ -107,9 +96,10 @@ function readPaneMap() {
   return map;
 }
 
-// Resolve the *current* pane for a process by matching pane_pid live, so
-// window/pane moves don't matter (agent_id -> pid -> current %pane).
-export function resolvePaneByPid(pid) {
+// Resolve the *current* pane for a process by matching pane_pid live, so a
+// window/pane move never leaves a stale snapshot behind. Module-local: it backs
+// liveLocation (re-anchoring) and agentLiveness, not any caller outside here.
+function resolvePaneByPid(pid) {
   const panes = livePaneMap();
   if (!panes) return null;
   for (const loc of panes.values()) {

@@ -3,7 +3,7 @@
 Two layers of testing for the bus.
 
 **Transport evals** — deterministic, scriptable, no live agent. Assert the
-mechanics: durable delivery, atomic claim, doorbell, identity, sweep, prune.
+mechanics: durable delivery, atomic claim, identity, sweep, prune, mail monitor.
 Pass/fail by exit code. See [`harness/basic.sh`](harness/basic.sh).
 
 **Behavioral evals** — what an actual `claude.exe` *does* with an injected

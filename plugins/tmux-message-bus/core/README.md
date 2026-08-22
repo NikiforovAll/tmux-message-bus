@@ -13,9 +13,8 @@ bus init                       Create bus.db (WAL, busy_timeout) + schema. Idemp
 bus register [--id ..] [--kind ..] [--instance ..] [--name ..] [--pid ..] [--cwd ..]
                                UPSERT this instance (default id=$BUS_AGENT_ID); refresh location.
 bus send --to <name|id> [--from ..] [--kind notify|request|reply|delegate]
-         [--subject ..] [--body .. | stdin] [--reply-to <id>] [--doorbell]
+         [--subject ..] [--body .. | stdin] [--reply-to <id>]
                                Durable INSERT of a message to a live agent.
-bus doorbell --to <name|id>    Ring (resolve agent_id->pid->current pane, send-keys "<<bus>>").
 bus claim [--me <id>]          Atomically claim new mail (UPDATE ... RETURNING), ordered by id.
 bus ack --ids <i,..> [--fail]  Mark claimed messages done (or failed).
 bus list [--all]               Live agents (--all includes dead).

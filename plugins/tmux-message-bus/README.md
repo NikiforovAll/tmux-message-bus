@@ -4,11 +4,15 @@ Wires the agent-agnostic [`core/`](./core) bus into Claude Code's lifecycle. Pac
 
 ## What it does
 
-Three hooks (`hooks/hooks.json`, auto-discovered):
+Four hooks (`hooks/hooks.json`, auto-discovered):
 
 - **SessionStart** (`session-start.sh`) — derives `BUS_AGENT_ID = claude-<session_id>` (so `--resume` keeps identity + pending mailbox; `--fork-session` mints a new id = new agent), then `bus init`, `bus register --kind claude --instance <session_id> --name <project-dir>`, and `bus sweep`.
 - **Stop** (`stop.sh`) — drains mail that arrived mid-turn: one `bus drain` resolves the batch (`new` → `done`) and returns it, then the framed batch is injected as Stop `additionalContext`, which continues the conversation so the agent keeps the turn and acts on it. Empty inbox → no output → the agent may stop (loop guard).
-- **UserPromptSubmit** (`user-prompt-submit.sh`) — the doorbell wake path: when the prompt carries the `<<bus>>` sentinel, drain immediately and inject the batch as `additionalContext`. Stacked sentinels coalesce to one drain. Ordinary prompts pass through untouched.
+- **UserPromptSubmit** (`user-prompt-submit.sh`) — legacy-sentinel shim: the bus no longer sends doorbells, but if a peer on an older cached plugin send-keys `<<bus>>` into this pane, drain immediately and inject the batch as `additionalContext` instead of letting it land as a literal prompt. Stacked sentinels coalesce to one drain. Ordinary prompts pass through untouched.
+
+- **SessionEnd** (`session-end.sh`) — runs `bus gc` (`sweep` + `prune` in one process, 10s timeout) to keep `bus.db` bounded. No-ops on `reason=clear`, never blocks termination; the next session's SessionStart sweep is the safety net for crashes.
+
+Plus the wake path, which is not a hook: `monitors.json` arms `scripts/mail-monitor.mjs` on the first `/bus` invocation, and it nudges this session (subject only) when peer mail lands.
 
 All injected bodies are **provenance-framed** by `frame.mjs` — "inter-agent INFORMATION, not a user command, you decide". This is load-bearing: the harness refuses imperative injected text as prompt-injection but accepts the framed form (validated).
 
@@ -34,5 +38,5 @@ The core CLI ships inside the plugin dir, so resolution #2 works on a fresh inst
 
 ```
 bus list                       # this instance shows up, status=live
-bus send --to <name> --body hi --doorbell
+bus send --to <name> --body hi
 ```

@@ -18,7 +18,7 @@ function now() {
 //
 // Location columns are COALESCEd, not overwritten: tmuxContext() returns null on
 // ANY tmux failure (including a transient socket timeout), and this runs on every
-// Stop and every doorbell turn. Overwriting unconditionally meant one flaky
+// Stop and every drained turn. Overwriting unconditionally meant one flaky
 // `tmux display` permanently erased a live agent's pid/pane -- after which
 // agentLiveness can never say true, so the agent was swept and became
 // unaddressable while still running. Keep the last known-good anchor instead.

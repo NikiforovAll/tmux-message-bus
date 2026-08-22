@@ -7,7 +7,7 @@
     {
       "name": "tmux-message-bus",
       "source": "./plugins/tmux-message-bus",
-      "description": "Claude Code adapter for the tmux-message-bus: durable cross-window/session messaging via a SessionStart register hook and a Stop-hook drain. Builds on the agent-agnostic `core/` bus."
+      "description": "Claude Code adapter for the tmux-message-bus: durable cross-window/session messaging via a SessionStart register hook, a Stop-hook drain, and a mail monitor that wakes an idle session when peer mail arrives. Builds on the agent-agnostic bundled `core/` bus."
     }
   ]
 }

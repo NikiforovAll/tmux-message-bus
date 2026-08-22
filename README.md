@@ -4,7 +4,7 @@
 
 Agents today are mostly islands. If you have three Claude Code sessions open in tmux, there's no clean way for one to hand work to another and trust it arrives. The common hack — scripting `tmux send-keys` to type into another pane — is fragile: it's lossy, racy, and breaks the moment a window moves or the target is mid-turn.
 
-This experiment flips that around. **The filesystem is the transport** (one SQLite-WAL database), and `send-keys` is demoted to an optional *doorbell* — a best-effort "you've got mail" nudge. Lose the doorbell and nothing breaks; the message is already durably stored and gets picked up on the agent's next turn.
+This experiment flips that around. **The filesystem is the transport** (one SQLite-WAL database), and nothing is ever typed into another agent's pane. Waking an idle peer is a separate, best-effort concern: a plugin *monitor* watches the mailbox and nudges its own session. Lose the nudge and nothing breaks; the message is already durably stored and gets picked up on the agent's next turn.
 
 The result is a mailbox model: **durable, ordered, no-duplicate** delivery between agents that never have to be online simultaneously.
 
@@ -22,7 +22,7 @@ flowchart LR
     DB[("bus.db<br/>SQLite WAL<br/>agents + messages")]
 
     A -- "1 send (durable INSERT)" --> DB
-    A -. "2 doorbell: send-keys «bus»<br/>(best-effort wake)" .-> B
+    DB -. "2 monitor nudge<br/>(best-effort wake)" .-> B
     B -- "3 drain (atomic) → act" --> DB
 
     DB -. registry / liveness .- A
@@ -39,9 +39,9 @@ sequenceDiagram
 
     A->>DB: send --to B (INSERT, status=new)
     Note over A,DB: delivery is done here — durable, cannot be lost
-    A-->>B: doorbell «bus» (best-effort send-keys)
+    DB-->>B: monitor nudge (best-effort, subject only)
     activate B
-    Note over B: next turn (woken by doorbell,<br/>or just its normal Stop hook)
+    Note over B: next turn (woken by the nudge,<br/>or just its normal Stop hook)
     B->>DB: drain (atomic new→done, ordered by id)
     Note over B: message injected as framed<br/>INFORMATION — B decides what to do
     deactivate B
@@ -64,7 +64,9 @@ plugins/tmux-message-bus/              # the Claude Code adapter (installable pl
   core/                                #   agent-agnostic bus, bundled inside
     bin/bus.mjs                        #     the `bus` CLI (node:sqlite, Node ≥ 22)
     src/                               #     db · identity · agents · messages
-  hooks/                               #   SessionStart register · Stop drain · doorbell · SessionEnd gc
+  hooks/                               #   SessionStart register · Stop drain · sentinel shim · SessionEnd gc
+  monitors.json                        #   arms the mail monitor on first /bus invocation
+  scripts/mail-monitor.mjs             #     the wake path: nudges this session on new mail
   skills/bus/                          #   /bus skill (list · inbox · send · reply)
 docs/DESIGN.md                         # architecture, identity model, schema, flows
 evals/                                 # deterministic transport harness + scenarios
@@ -72,7 +74,7 @@ evals/                                 # deterministic transport harness + scena
 
 Two layers, deliberately decoupled:
 
-- **The core** (`plugins/tmux-message-bus/core/`) is an agent-agnostic Node CLI — `init`, `register`, `list`, `send`, `reply`, `inbox`, `drain`, `claim`, `ack`, `show`, `sweep`, `prune`, `gc`, `doorbell`. It knows nothing about Claude; any agent that can run a shell command and set `BUS_AGENT_ID` can use it. (It lives *inside* the plugin so a marketplace install, which copies only the plugin dir, still ships it.)
+- **The core** (`plugins/tmux-message-bus/core/`) is an agent-agnostic Node CLI — `init`, `register`, `list`, `send`, `reply`, `inbox`, `drain`, `claim`, `ack`, `show`, `sweep`, `prune`, `gc`, `whoami`. It knows nothing about Claude; any agent that can run a shell command and set `BUS_AGENT_ID` can use it. (It lives *inside* the plugin so a marketplace install, which copies only the plugin dir, still ships it.)
 - **The Claude adapter** (`plugins/tmux-message-bus/`) wires that core into Claude Code's lifecycle via hooks, packaged as its own installable plugin.
 
 ## Try it
@@ -88,7 +90,7 @@ Then, from two Claude sessions in different tmux windows:
 
 ```
 bus list                              # see who's reachable
-bus send --to <name> --body "build green?" --doorbell
+bus send --to <name> --body "build green?"
 ```
 
 The receiver picks it up on its next turn — see [`docs/DESIGN.md`](docs/DESIGN.md) for the full architecture and the [`/bus`](plugins/tmux-message-bus/skills/bus) skill for the Claude-facing wrapper.

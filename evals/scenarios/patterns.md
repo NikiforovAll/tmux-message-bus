@@ -7,7 +7,7 @@ the **core primitives**, not agent judgment (that's `behavioral.md`).
 Legend: ✅ native primitive · ⚠️ works but caller-side / by convention · ❌ gap, no primitive yet.
 
 Primitives today: `send --to <one>` (single target), `reply --to-msg <id>`
-(targets sender, sets `reply_to`), `claim`/`ack`, `doorbell`, `list`, `inbox`.
+(targets sender, sets `reply_to`), `claim`/`ack`, `list`, `inbox`.
 There is **no** multi-target send, no broadcast target, and no parent linkage.
 
 ---
@@ -17,7 +17,7 @@ There is **no** multi-target send, no broadcast target, and no parent linkage.
 One agent asks, one agent answers. The bedrock pattern.
 
 ```
-A --request "build green?"--> B        (send --to B --kind request [--doorbell])
+A --request "build green?"--> B        (send --to B --kind request)
 A <--reply reply_to=N------- B         (reply --to-msg N)   # B drains, answers
 ```
 
@@ -65,7 +65,7 @@ A --notify "deploying main"--> { every live agent except A }
 - **Design questions for the primitive:**
   - self-exclusion (don't notify yourself); audience filter (by `kind`/`name`)?
   - deliver to dead agents? No — broadcast should reuse sweep-on-send and skip corpses.
-  - doorbell all recipients, or deliver-quiet? (Broadcasts are usually low-urgency.)
+  - nudge all recipients via their monitors, or deliver-quiet? (Broadcasts are usually low-urgency.)
   - storage: N rows (one per recipient, fits the mailbox model) vs. one fanned row.
     N rows keeps claim/ack uniform — recommended.
 - **Eval:** P3-a broadcast to 3 peers → 3 inboxes each get 1, sender's does not;

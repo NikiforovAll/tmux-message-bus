@@ -117,14 +117,19 @@ chk "T6b drained mail not redelivered" "$DR2" "0"
 DRREQ=$(BUS sweep --stale-ms 0 | J 'd.requeued.length')
 chk "T6b drain leaves nothing for sweep to requeue" "$DRREQ" "0"
 
-# --- T7 doorbell delivery ---
-BUS doorbell --to claude-evB >/dev/null; sleep 0.3
-RANG=$(tmux capture-pane -t "$PANE_B" -p | grep -c 'bus')
-[ "$RANG" -ge 1 ] && ok "T7 doorbell lands <<bus>> in pane" || bad "T7 doorbell (got $RANG)"
+# --- T7 no send-keys wake path: the doorbell is gone ---
+# Removed in 2.1.0 (the mail monitor is the wake path). Assert both the command
+# and its help entry are gone.
+BUS doorbell --to claude-evB >/dev/null 2>&1 && bad "T7 doorbell command still exists" || ok "T7 doorbell command removed"
+BUS help 2>/dev/null | grep -qi doorbell && bad "T7 help still advertises doorbell" || ok "T7 help has no doorbell"
 
-# --- T8 doorbell to dead/unknown target (no throw, not rung) ---
-RUNGD=$(BUS doorbell --to nonexistent-agent 2>/dev/null | J 'String(d.rung)')
-if [ "$RUNGD" = "false" ] || [ -z "$RUNGD" ]; then ok "T8 doorbell unknown target -> not rung / no throw"; else bad "T8 dead doorbell (got $RUNGD)"; fi
+# --- T8 send never injects keystrokes; the retired flag is rejected loudly ---
+BUS_AGENT_ID="claude-evA" BUS send --to claude-evB --kind notify --body "no-bell" >/dev/null
+sleep 0.3
+RANG=$(tmux capture-pane -t "$PANE_B" -p | grep -c '<<bus>>' || true)
+chk "T8 no <<bus>> sentinel lands in the peer pane" "${RANG:-0}" "0"
+BUS_AGENT_ID="claude-evA" BUS send --to claude-evB --body x --doorbell >/dev/null 2>&1   && bad "T8 --doorbell silently accepted" || ok "T8 retired --doorbell flag rejected"
+BUS drain --me claude-evB >/dev/null 2>&1
 
 # --- T9 sweep marks dead + requeues stale claim ---
 BUS_AGENT_ID="claude-evA" BUS send --to claude-evB --kind notify --body "stale" >/dev/null
@@ -224,8 +229,8 @@ chk "T18 stop injects as Stop additionalContext" \
 chk "T18 stop emits no block decision" "$(printf '%s' "$INJ" | J 'd.decision===undefined')" "true"
 chk "T18 drained inbox makes the next stop silent" \
   "$(HOOK "$PANE_CR" stop.sh '{"session_id":"evCR","stop_hook_active":false}')" ""
-BUS_AGENT_ID="claude-evCS" BUS send --to bushopper --kind notify --body "doorbell-body" >/dev/null
-chk "T18 doorbell injects as UserPromptSubmit additionalContext" \
+BUS_AGENT_ID="claude-evCS" BUS send --to bushopper --kind notify --body "sentinel-body" >/dev/null
+chk "T18 legacy sentinel injects as UserPromptSubmit additionalContext" \
   "$(HOOK "$PANE_CR" user-prompt-submit.sh '{"session_id":"evCR","prompt":"<<bus>>"}' | J 'd.hookSpecificOutput.hookEventName')" \
   "UserPromptSubmit"
 chk "T18 ordinary prompt injects nothing" \
@@ -316,7 +321,7 @@ chk "T22 --me <session-id> reads the mail --to <session-id> delivered" \
 
 # --- T22b empty inbox explains itself (drain already consumed it) ---
 # The hooks drain new->done before the agent's first tool call, so an empty read
-# on a <<bus>> turn is success. A bare [] made that indistinguishable from loss.
+# right after a mail nudge is success. A bare [] made that indistinguishable from loss.
 EH=$(BUS inbox --me evA)
 chk "T22b empty inbox is still ok:true with no messages" "$(printf '%s' "$EH" | J 'd.messages.length')" "0"
 printf '%s' "$EH" | grep -q 'hint' && ok "T22b empty inbox carries a hint" || bad "T22b empty inbox has no hint ($EH)"
@@ -368,14 +373,14 @@ chk "T22d the tmux agent still survives that same sweep" \
 # --- T23 mail monitor: peek-only nudges, once per message, session-scoped ---
 # The plugin-monitor script watches the DB and prints one notification line per
 # new message for ITS session; it never drains (the hooks stay the sole
-# consumer). First attach must announce mail already 'new' — a failed doorbell's
-# mail is exactly what the session is owed.
+# consumer). First attach must announce mail already 'new' — mail that landed
+# while no monitor was armed is exactly what the session is owed.
 MON="$(wpath "$CLAUDE_PLUGIN_ROOT/scripts/mail-monitor.mjs")"
 MOUT="$WORK/monitor.out"
 # grep -c exits 1 on zero matches and prints nothing on a missing file — both
 # must read as a plain 0 for the poll loops below.
-nudges() { local n; n=$(grep -c 'mail from' "$MOUT" 2>/dev/null); echo "${n:-0}"; }
-wait_nudges() { local i; LINES=0; for i in $(seq 1 25); do LINES=$(nudges); [ "$LINES" -ge "$1" ] && break; sleep 0.2; done; }
+nudges() { local n; n=$(grep -c 'mail from' "${1:-$MOUT}" 2>/dev/null); echo "${n:-0}"; }
+wait_nudges() { local i; LINES=0; for i in $(seq 1 25); do LINES=$(nudges "${2:-}"); [ "$LINES" -ge "$1" ] && break; sleep 0.2; done; }
 bytes() { wc -c < "$1" | tr -d ' '; }
 BUS inbox --me evA >/dev/null   # clean slate: earlier cases left mail for evA
 BUS_AGENT_ID="claude-evB" BUS send --to claude-evA --kind notify --body "pre-attach" --no-verify >/dev/null
@@ -408,6 +413,40 @@ chk "T23 escape bytes stripped from the nudge" "$(grep -c $'\x1b' "$MOUT")" "0"
 SRC=$(CLAUDE_CODE_SESSION_ID=evA CLAUDE_PLUGIN_DATA="$WORK" timeout 5 node "$MON" > "$WORK/mon2.out"; echo "rc=$?")
 chk "T23 second instance exits immediately" "$SRC" "rc=0"
 chk "T23 second instance prints nothing" "$(bytes "$WORK/mon2.out")" "0"
+# T23b lock hijack: the pid file must not be able to silence the wake path.
+# A record nobody is refreshing is stale no matter who holds that pid now --
+# Windows recycles pids and the file is never cleaned up on exit, so honouring a
+# bare live pid used to make the real monitor exit with zero nudges. Reuses evA
+# (its monitor is dead now, its mailbox still holds undrained 'new' mail, so a
+# working monitor must re-announce on attach).
+stop_monitor() { [ -n "$MONPID" ] && kill "$MONPID" 2>/dev/null; wait "$MONPID" 2>/dev/null; MONPID=""; }
+stop_monitor
+LOCK="$WORK/bus-mail-monitor-evA.pid"
+HOUT="$WORK/monH.out"
+HIJACK=$$   # this shell: unquestionably alive, and not a mail monitor
+# Plant a lock record ($1), attach a monitor for evA, assert it still nudges ($2).
+takeover() {
+  printf '%s' "$1" > "$LOCK"; : > "$HOUT"
+  CLAUDE_CODE_SESSION_ID=evA CLAUDE_PLUGIN_DATA="$WORK" BUS_MONITOR_POLL_MS=200 node "$MON" > "$HOUT" &
+  MONPID=$!
+  wait_nudges 1 "$HOUT"
+  chk "$2" "$([ "$LINES" -ge 1 ] && echo nudged || echo silent)" "nudged"
+}
+# (a) a bare live pid (the <=2.1.0 lock format) is not our record -> start anyway
+takeover "$HIJACK" "T23b bare-pid lock does not silence the monitor"
+# The lock must now be OUR record (tag + session + a fresh beat), not the bare
+# pid we planted -- $MONPID is an MSYS pid and node reports the Windows one, so
+# match the record shape rather than the number.
+chk "T23b monitor claims the lock with its own heartbeat record"   "$(J 'd.tag === "bus-mail-monitor" && d.sid === "evA" && d.beatAt > Date.now() - 60000' < "$LOCK")" "true"
+stop_monitor
+# (b) our tag + a live unrelated pid, but a beat nobody refreshed -> stale, start
+takeover "$(printf '{"tag":"bus-mail-monitor","sid":"evA","pid":%s,"beatAt":1}' "$HIJACK")"   "T23b stale heartbeat is taken over"
+# (c) that live monitor's own record IS honoured: a second instance still exits
+HRC=$(CLAUDE_CODE_SESSION_ID=evA CLAUDE_PLUGIN_DATA="$WORK" timeout 5 node "$MON" > "$WORK/monH2.out"; echo "rc=$?")
+chk "T23b live heartbeat still blocks a second instance" "$HRC" "rc=0"
+chk "T23b blocked second instance prints nothing" "$(bytes "$WORK/monH2.out")" "0"
+stop_monitor
+
 # guards: no session id -> silent no-op; missing DB -> silent wait, no crash
 GRC=$(env -u CLAUDE_CODE_SESSION_ID timeout 5 node "$MON" > "$WORK/mon3.out"; echo "rc=$?")
 chk "T23 no session id -> silent exit 0" "$GRC" "rc=0"

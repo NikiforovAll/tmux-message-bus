@@ -1,7 +1,7 @@
 // Command dispatch for the `bus` CLI. Agent-agnostic core.
 import { initDb, dbPath } from "./db.mjs";
 import { register, list, sweep } from "./agents.mjs";
-import { send, claim, drain, ack, doorbell, prune, reply, inbox, show, selfId, selfFlag, resolveTarget, callerSession, unreadBySender } from "./messages.mjs";
+import { send, claim, drain, ack, prune, reply, inbox, show, selfId, selfFlag, resolveTarget, callerSession, unreadBySender } from "./messages.mjs";
 import { openDb } from "./db.mjs";
 
 // Shortest `--to` token that actually resolves to this agent from the caller's
@@ -76,10 +76,10 @@ function emitJson(obj) {
 
 // Terse confirmation for send/reply: the caller already knows the body it sent,
 // so echo only what it cannot derive -- the assigned id (for reply correlation),
-// the resolved target, kind, reply_to, and the best-effort doorbell result.
+// the resolved target, kind, and reply_to.
 function emitSent(row) {
-  const { id, from_agent, to_agent, kind, reply_to, _doorbell } = row;
-  emitJson({ ok: true, message: { id, from_agent, to_agent, kind, reply_to }, doorbell: _doorbell });
+  const { id, from_agent, to_agent, kind, reply_to } = row;
+  emitJson({ ok: true, message: { id, from_agent, to_agent, kind, reply_to } });
 }
 
 const USAGE = `bus — durable message bus for agents in tmux
@@ -105,13 +105,12 @@ Commands:
                          --subject <s>          subject line
                          --body <text>          body (omit to read stdin)
                          --reply-to <id>        correlate a reply to a request
-                         --doorbell             ring the target after insert
                          --no-verify            skip target-liveness check
                          --envelope <path|->    read all fields from a JSON object
                            (file, or - for stdin); CLI flags override its keys.
                            Avoids Git Bash mangling long/special-char args.
   reply --to-msg <id>  Reply to a message (targets its sender, sets reply_to).
-                         [--body .. | stdin] [--subject ..] [--doorbell]
+                         [--body .. | stdin] [--subject ..]
                          [--no-verify] [--envelope <path|->]
   inbox [--me <id>] [--peek] [--status S]  Read new mail; auto-acks (new->done).
                          --peek  read-only, do not consume (leave for the drain).
@@ -120,7 +119,6 @@ Commands:
                          An empty result carries a "hint" explaining why (e.g. the
                            drain hook already consumed it into this turn).
   show <id> (alias get) Read a single message by id (read-only, no claim/ack).
-  doorbell --to <t>    Ring an agent's doorbell (resolve pid->pane, send-keys).
   claim [--me <id>]    Atomically claim new mail (RETURNING), ordered by id.
   drain [--me <id>]    Atomically claim AND resolve new mail (new->done) in one
                          statement -- the drain hooks' deliver step (no claim/ack gap).
@@ -149,6 +147,13 @@ DB path: ${dbPath()}  (override with $BUS_DB)
 
 // Flags that take no value (presence => true). Every other --key consumes the
 // next token as its literal value, so --body/--subject etc. may start with "--".
+// Retired in 2.1.0. Rejected loudly rather than ignored: an old caller deserves
+// to be told the wake path moved instead of watching its sends silently change
+// meaning. "doorbell" stays in BOOLEAN_FLAGS so `--doorbell` parses as a flag
+// (and not as a key eating the next token) before the guard in main() sees it.
+const DOORBELL_GONE =
+  "doorbell was removed in 2.1.0: send-keys wakes are gone; the mail monitor nudges idle peers (delivery is the INSERT)";
+
 const BOOLEAN_FLAGS = new Set([
   "doorbell",
   "all",
@@ -198,6 +203,7 @@ function parseFlags(argv) {
 export async function main(argv) {
   const [cmd, ...rest] = argv;
   const flags = parseFlags(rest);
+  if (cmd === "doorbell" || flags.doorbell) throw new Error(DOORBELL_GONE);
   switch (cmd) {
     case "init": {
       const r = initDb();
@@ -228,11 +234,6 @@ export async function main(argv) {
     case "get": {
       const message = show({ id: flags.id ?? flags._[0] });
       emitJson({ ok: true, message });
-      return 0;
-    }
-    case "doorbell": {
-      const r = doorbell(flags);
-      emitJson({ ok: true, ...r });
       return 0;
     }
     case "claim": {

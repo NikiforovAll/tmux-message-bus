@@ -37,12 +37,18 @@ full flow in `evals/scenarios/live-runbook.md`.
 `scripts/mail-monitor.mjs` on the first `/bus` skill invocation in a session.
 Nudge-only: it peeks `bus.db` and prints one notification line per new message
 (delivered as a task notification, waking an idle agent); the agent drains via
-`bus inbox`. Doorbell stays in the CLI as a fallback for unarmed peers. Design:
-`docs/DESIGN.md` "Mail monitor".
+`bus inbox`. It is the *only* wake path — the send-keys doorbell was deleted in
+2.1.0 (`bus doorbell` / `--doorbell` now exit non-zero); unarmed peers still get
+their mail on the next Stop drain, since delivery is the INSERT. Design:
+`docs/DESIGN.md` "Mail monitor" + "Doorbell removed".
 
 - Monitors are experimental and interactive-CLI only; like hooks, changes need a
   fresh `--plugin-dir` session (`/reload-plugins` does not restart them).
-- Standalone test: eval T23, or by hand:
+- The per-session singleton is a heartbeat lock under `CLAUDE_PLUGIN_DATA`
+  (`{tag,sid,pid,beatAt}`, rewritten every `max(pollMs, 5s)` on its own timer;
+  stale after three beats): a pid alone was hijackable by pid reuse and would
+  silence the only wake path. Why, in full: `docs/DESIGN.md` "Mail monitor".
+- Standalone test: evals T23 + T23b, or by hand:
   `CLAUDE_CODE_SESSION_ID=<sid> BUS_MONITOR_POLL_MS=200 node plugins/tmux-message-bus/scripts/mail-monitor.mjs`
   (`BUS_DB`, `BUS_MONITOR_RETRY_MS`, `CLAUDE_PLUGIN_DATA` also overridable).
 

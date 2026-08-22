@@ -1,12 +1,9 @@
 // Queue operations on the `messages` table (agent-agnostic).
-// Delivery (durable INSERT) is separate from notification (best-effort doorbell).
+// Delivery (durable INSERT) is separate from notification: the INSERT is the
+// message; waking an idle peer is the mail monitor's job, not this layer's.
 import { openDb } from "./db.mjs";
-import { resolvePaneByPid, sendKeysSentinel, agentLiveness, liveLocation, reanchor } from "./identity.mjs";
+import { agentLiveness, liveLocation, reanchor } from "./identity.mjs";
 import { readFileSync } from "node:fs";
-
-// Fixed wake sentinel. The adapter's UserPromptSubmit hook recognizes it and
-// drains the whole mailbox, so repeated rings coalesce to a single drain.
-export const SENTINEL = "<<bus>>";
 
 const KINDS = new Set(["notify", "request", "reply", "delegate"]);
 
@@ -87,7 +84,7 @@ export function selfId(db, explicit) {
     if (row) return row.agent_id;
   }
   // Null, NOT a throw: plenty of legitimate callers run from a pane that is not
-  // itself a registered agent (a plain shell doing `bus list`, `bus doorbell`).
+  // itself a registered agent (a plain shell doing `bus list`, `bus show`).
   // Those degrade gracefully; the commands that genuinely need a mailbox
   // (inbox/claim/drain) raise their own error via requireSelf. Only an
   // EXPLICITLY asserted identity is fatal above -- the caller named an agent, so
@@ -394,9 +391,6 @@ export function send(opts) {
          RETURNING *`,
       )
       .get(row);
-    if (opts.doorbell) {
-      r._doorbell = doorbell({ to: to_agent });
-    }
     return r;
   } finally {
     db.close();
@@ -405,7 +399,7 @@ export function send(opts) {
 
 // Reply to a specific message: target = the original sender, kind='reply',
 // reply_to = the original id. Resolves correlation without the caller having to
-// know who sent it. --doorbell rings the recipient.
+// know who sent it.
 export function reply(opts) {
   opts = applyEnvelope(opts); // body/subject from envelope; `to` is ignored (target = sender)
   if (opts["to-msg"] == null) throw new Error("reply: --to-msg <id> is required");
@@ -427,7 +421,6 @@ export function reply(opts) {
     subject: opts.subject,
     body: opts.body,
     "reply-to": orig.id,
-    doorbell: opts.doorbell,
     "no-verify": opts["no-verify"],
     _stdinConsumed: opts._stdinConsumed,
   });
@@ -435,7 +428,7 @@ export function reply(opts) {
 
 // Read an agent's mailbox. Default (new mail) AUTO-ACKS: claims and marks done
 // in one step (new -> done), so what you pull here won't be re-delivered by the
-// Stop/doorbell drain. Pass --peek for a read-only look that leaves mail for the
+// Stop drain. Pass --peek for a read-only look that leaves mail for the
 // drain. A non-default --status view is always read-only (only 'new' mail is
 // consumable; claimed/done/failed are terminal-ish and just inspected).
 // Returns { messages, hint }: hint is non-null only for an empty read, and says
@@ -467,9 +460,9 @@ export function inbox(opts = {}) {
 }
 
 // Why an empty mailbox is empty. A bare `[]` reads as "my mail was lost", which
-// is exactly how a healthy bus got diagnosed as broken: the drain hooks consume
-// mail (new->done) BEFORE the agent's first tool call, so an empty inbox on a
-// <<bus>> turn is what success looks like -- the content is already in context.
+// is exactly how a healthy bus got diagnosed as broken: the Stop drain consumes
+// mail (new->done) before the agent's next turn, so an empty inbox right after a
+// mail notification is what success looks like -- it is already in context.
 // Names the resolved identity too, so a wrong --me is visible at a glance.
 function emptyHint(db, me, status) {
   const counts = db
@@ -481,8 +474,8 @@ function emptyHint(db, me, status) {
   return (
     `no '${status}' mail for '${me}' (mailbox holds: ${summary})` +
     (drained
-      ? " -- if a <<bus>> marker just fired, the Stop/UserPromptSubmit hook already" +
-        " drained it into this turn's context; re-read it with --status done or `bus show <id>`"
+      ? " -- the Stop drain hook already delivered it as this turn's context;" +
+        " re-read it with --status done or `bus show <id>`"
       : "")
   );
 }
@@ -497,26 +490,6 @@ export function show(opts = {}) {
   } finally {
     db.close();
   }
-}
-
-// Ring an agent's doorbell: resolve agent_id -> pid -> current pane live, then
-// send-keys the sentinel. Best-effort — a failed ring costs latency only (the
-// peer still drains on its next turn). Returns where it rang (or why not).
-export function doorbell(opts) {
-  const me = opts.to;
-  const db = openDb();
-  let agent;
-  try {
-    const id = resolveTarget(db, me, "doorbell", callerSession(db, opts.me ?? opts.from ?? opts.id));
-    agent = db.prepare("SELECT agent_id, pid FROM agents WHERE agent_id = ?").get(id);
-  } finally {
-    db.close();
-  }
-  if (!agent) return { rung: false, reason: "no such agent" };
-  const pane = resolvePaneByPid(agent.pid);
-  if (!pane) return { rung: false, reason: "no live pane for pid", agent: agent.agent_id };
-  sendKeysSentinel(pane, SENTINEL);
-  return { rung: true, agent: agent.agent_id, pane };
 }
 
 const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days

@@ -11,8 +11,9 @@ Mechanics of the bus, independent of any agent's judgment. All asserted by
 | T4 | Durable delivery | `send` INSERTs; message readable in `inbox` before any claim; survives process exit |
 | T5 | Atomic claim under concurrency | N messages, two `claim` processes in parallel → partition is disjoint, union = N, zero double-claim |
 | T6 | `ack` lifecycle | claimed → `ack` marks `done`; `--fail` marks `failed`; re-claim does not return acked rows |
-| T7 | Doorbell delivery | `--doorbell` / `doorbell` lands literal `<<bus>>` in target's current pane (verify via `capture-pane`) |
-| T8 | Doorbell to dead target | resolves to no live pane → `rung:false`, no throw |
+| T23b | Monitor lock cannot silence the wake | a bare/stale lock record is taken over (monitor still nudges); only a live, freshly-beating record of ours blocks a second instance |
+| T7 | No send-keys wake path | `bus doorbell` is gone (non-zero exit) and `bus help` never mentions it — removed in 2.1.0 |
+| T8 | Send injects no keystrokes | a plain `send` leaves no `<<bus>>` in the target's pane (`capture-pane`); the retired `--doorbell` flag exits non-zero |
 | T9 | Sweep marks dead + requeues | kill a pane → `sweep` marks that agent dead; a stale `claimed` message (older than stale-ms) returns to `new` |
 | T10 | Reply correlation | `reply --to-msg <id>` targets original sender, sets `reply_to = id`, kind `reply` |
 | T11 | Prune retention | `done`/`failed` older than max-age deleted; `new`/`claimed` untouched; WAL checkpointed |
