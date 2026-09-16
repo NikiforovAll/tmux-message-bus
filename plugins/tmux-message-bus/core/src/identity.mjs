@@ -4,6 +4,9 @@
 // mutable location: snapshotted on register, re-anchored live at read time
 // (liveLocation) so resolution never trusts a stale snapshot.
 import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { dbPath } from "./db.mjs";
 
 // Block the calling thread briefly. execFileSync gives us no async budget, and a
 // retry that fires instantly tends to hit the same refused socket.
@@ -32,19 +35,96 @@ function permanentFailure(err) {
 // loaded host can buy slack without a rebuild.
 const EXEC_TIMEOUT_MS = Number(process.env.BUS_TMUX_TIMEOUT_MS) || 1500;
 
+// Once a server stops answering it usually stays that way (on 2026-09-16 a
+// deadlocked server survived SIGUSR1, every client dying, and the popup that
+// triggered it -- only killing it helped). Meanwhile every hook keeps arriving:
+// register on each prompt and each Stop, the monitor beat, window-name. Each
+// one then pays the deadline and leaves a client that SIGTERM cannot reap,
+// whose socket stays ESTABLISHED in the server's queue. So a run of breached
+// deadlines trips a breaker and later calls short-circuit to the unknown
+// verdict until it expires. Beside the DB so BUS_DB isolates tests.
+const BREAKER_MS = Number(process.env.BUS_TMUX_BREAKER_MS) || 30000;
+
+// Consecutive breaches before the breaker opens. Not one: the MSYS socket
+// refuses a connection outright in ~7.6% of calls, and Winsock's SYN retries
+// make that refusal take SECONDS, so a single flake breaches the deadline and
+// is indistinguishable from a wedge. Tripping on it blacked tmux out for 30s
+// and took the eval suite from 97/3 to 60/40 -- register and whoami cannot
+// survive a blackout. A real wedge keeps breaching and still trips on the
+// third call; a flake is erased by the next success.
+const BREAKER_TRIPS = Number(process.env.BUS_TMUX_BREAKER_TRIPS) || 3;
+// A run of breaches only counts as a run if they are close together.
+const BREAKER_WINDOW_MS = 15000;
+
+function breakerPath() {
+  return join(dirname(dbPath()), "tmux-breaker");
+}
+
+function readBreaker() {
+  try {
+    const s = JSON.parse(readFileSync(breakerPath(), "utf8"));
+    return typeof s?.count === "number" ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+// A full run plus a recent breach IS the open state: no exec runs while the
+// breaker is open, so lastMs cannot advance during a blackout.
+function breakerOpen() {
+  const s = readBreaker();
+  return s != null && s.count >= BREAKER_TRIPS && Date.now() - s.lastMs < BREAKER_MS;
+}
+
+function tripBreaker() {
+  try {
+    const now = Date.now();
+    const prev = readBreaker();
+    const run = prev && now - prev.lastMs < BREAKER_WINDOW_MS ? prev.count : 0;
+    mkdirSync(dirname(breakerPath()), { recursive: true });
+    writeFileSync(breakerPath(), JSON.stringify({ count: run + 1, lastMs: now }));
+  } catch {
+    // A breaker we cannot write is a breaker we do without; never fail a call
+    // over it.
+  }
+}
+
+function clearBreaker() {
+  try {
+    rmSync(breakerPath(), { force: true });
+  } catch {
+    /* same rationale as tripBreaker */
+  }
+}
+
+function wedgedError() {
+  const err = new Error("tmux breaker open: server not answering");
+  err.code = "ETIMEDOUT";
+  return err;
+}
+
 // One retry by default. The tmux socket on Windows/MSYS intermittently refuses a
 // connection ("error connecting to ... (Connection timed out)") and answers fine
 // moments later; observed in ~7.6% of registrations. A single flaky exec used to
 // be indistinguishable from "the pane is gone", which is how a live agent got
 // its location NULLed and then swept -- see livePaneMap's unknown contract.
 function tmux(args, retries = 1) {
+  if (breakerOpen()) throw wedgedError();
   for (let attempt = 0; ; attempt++) {
     try {
-      return execFileSync("tmux", args, {
+      const out = execFileSync("tmux", args, {
         encoding: "utf8",
         timeout: EXEC_TIMEOUT_MS,
+        // SIGTERM leaves a client blocked in Winsock alive and unkillable,
+        // holding an ESTABLISHED socket the server still has to account for.
+        killSignal: "SIGKILL",
       }).trim();
+      // An answer means the outage is over, and it also erases a half-counted
+      // run of flakes.
+      clearBreaker();
+      return out;
     } catch (err) {
+      if (err.code === "ETIMEDOUT") tripBreaker();
       if (attempt >= retries || permanentFailure(err)) throw err;
       sleepSync(150);
     }
