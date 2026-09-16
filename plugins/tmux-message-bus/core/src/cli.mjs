@@ -147,15 +147,7 @@ DB path: ${dbPath()}  (override with $BUS_DB)
 
 // Flags that take no value (presence => true). Every other --key consumes the
 // next token as its literal value, so --body/--subject etc. may start with "--".
-// Retired in 2.1.0. Rejected loudly rather than ignored: an old caller deserves
-// to be told the wake path moved instead of watching its sends silently change
-// meaning. "doorbell" stays in BOOLEAN_FLAGS so `--doorbell` parses as a flag
-// (and not as a key eating the next token) before the guard in main() sees it.
-const DOORBELL_GONE =
-  "doorbell was removed in 2.1.0: send-keys wakes are gone; the mail monitor nudges idle peers (delivery is the INSERT)";
-
 const BOOLEAN_FLAGS = new Set([
-  "doorbell",
   "all",
   "fail",
   "dry-run",
@@ -202,8 +194,16 @@ function parseFlags(argv) {
 
 export async function main(argv) {
   const [cmd, ...rest] = argv;
+  // Retired in 2.1.0. Rejected loudly rather than ignored: an old caller
+  // deserves to be told the wake path moved instead of watching its sends
+  // silently change meaning. Checked on the raw argv, before parsing, so the
+  // dead name never has to be carried in BOOLEAN_FLAGS to parse correctly.
+  if (cmd === "doorbell" || rest.some((a) => a === "--doorbell" || a.startsWith("--doorbell="))) {
+    throw new Error(
+      "doorbell was removed in 2.1.0: send-keys wakes are gone; the mail monitor nudges idle peers (delivery is the INSERT)",
+    );
+  }
   const flags = parseFlags(rest);
-  if (cmd === "doorbell" || flags.doorbell) throw new Error(DOORBELL_GONE);
   switch (cmd) {
     case "init": {
       const r = initDb();

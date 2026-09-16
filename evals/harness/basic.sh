@@ -27,7 +27,10 @@ bad()  { echo "  FAIL  $1"; FAIL=$((FAIL+1)); }
 chk()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want=$3 got=$2)"; fi; }
 
 MONPID=""; NODBPID=""
-cleanup() { [ -n "$MONPID" ] && kill "$MONPID" 2>/dev/null; [ -n "$NODBPID" ] && kill "$NODBPID" 2>/dev/null; tmux kill-session -t evalA 2>/dev/null; tmux kill-session -t evalB 2>/dev/null; tmux kill-session -t evalC 2>/dev/null; tmux kill-session -t evalD 2>/dev/null; rm -rf "$WORK"; }
+# Reap the monitor, not just signal it: an unwaited-for child can still write to
+# its output file after the kill, which races the next case's assertions.
+stop_monitor() { [ -n "$MONPID" ] && kill "$MONPID" 2>/dev/null; wait "$MONPID" 2>/dev/null; MONPID=""; }
+cleanup() { stop_monitor; [ -n "$NODBPID" ] && kill "$NODBPID" 2>/dev/null; tmux kill-session -t evalA 2>/dev/null; tmux kill-session -t evalB 2>/dev/null; tmux kill-session -t evalC 2>/dev/null; tmux kill-session -t evalD 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT
 
 echo "== bus transport eval =="
@@ -379,8 +382,8 @@ MON="$(wpath "$CLAUDE_PLUGIN_ROOT/scripts/mail-monitor.mjs")"
 MOUT="$WORK/monitor.out"
 # grep -c exits 1 on zero matches and prints nothing on a missing file — both
 # must read as a plain 0 for the poll loops below.
-nudges() { local n; n=$(grep -c 'mail from' "${1:-$MOUT}" 2>/dev/null); echo "${n:-0}"; }
-wait_nudges() { local i; LINES=0; for i in $(seq 1 25); do LINES=$(nudges "${2:-}"); [ "$LINES" -ge "$1" ] && break; sleep 0.2; done; }
+nudges() { local n; n=$(grep -c 'mail from' "$1" 2>/dev/null); echo "${n:-0}"; }
+wait_nudges() { local i f="${2:-$MOUT}"; LINES=0; for i in $(seq 1 25); do LINES=$(nudges "$f"); [ "$LINES" -ge "$1" ] && break; sleep 0.2; done; }
 bytes() { wc -c < "$1" | tr -d ' '; }
 BUS inbox --me evA >/dev/null   # clean slate: earlier cases left mail for evA
 BUS_AGENT_ID="claude-evB" BUS send --to claude-evA --kind notify --body "pre-attach" --no-verify >/dev/null
@@ -399,10 +402,10 @@ grep -q 'bus inbox' "$MOUT" && ok "T23 nudge points at bus inbox" || bad "T23 nu
 # other-recipient mail must not nudge this session
 BUS_AGENT_ID="claude-evA" BUS send --to claude-evCR --kind notify --body "not-yours" --no-verify >/dev/null
 sleep 1
-chk "T23 mail for a peer does not nudge" "$(nudges)" "2"
+chk "T23 mail for a peer does not nudge" "$(nudges "$MOUT")" "2"
 # peek-only + high-water mark: undrained 'new' mail is announced exactly once
 chk "T23 monitor never drains (mail still new)" "$(BUS inbox --me evA --peek | J 'd.messages.length')" "2"
-chk "T23 no re-nudge while mail sits new" "$(nudges)" "2"
+chk "T23 no re-nudge while mail sits new" "$(nudges "$MOUT")" "2"
 # subject is peer-written: control chars must not forge a second notification line
 printf '%s' '{"to":"evA","kind":"notify","subject":"one\ntwo\u001b[31m","body":"x"}' \
   | BUS_AGENT_ID="claude-evB" BUS send --envelope - --no-verify >/dev/null
@@ -419,7 +422,6 @@ chk "T23 second instance prints nothing" "$(bytes "$WORK/mon2.out")" "0"
 # bare live pid used to make the real monitor exit with zero nudges. Reuses evA
 # (its monitor is dead now, its mailbox still holds undrained 'new' mail, so a
 # working monitor must re-announce on attach).
-stop_monitor() { [ -n "$MONPID" ] && kill "$MONPID" 2>/dev/null; wait "$MONPID" 2>/dev/null; MONPID=""; }
 stop_monitor
 LOCK="$WORK/bus-mail-monitor-evA.pid"
 HOUT="$WORK/monH.out"
@@ -458,7 +460,7 @@ sleep 1
 kill -0 "$NODBPID" 2>/dev/null && ok "T23 missing DB -> keeps waiting, no crash" || bad "T23 missing DB crashed the monitor"
 kill "$NODBPID" 2>/dev/null; NODBPID=""
 chk "T23 missing DB -> silent" "$(bytes "$WORK/mon4.out")" "0"
-kill "$MONPID" 2>/dev/null; MONPID=""
+stop_monitor
 
 echo ""
 echo "== $PASS passed, $FAIL failed =="

@@ -11,14 +11,16 @@ set -uo pipefail
 . "${BASH_SOURCE[0]%/*}/lib.sh"
 
 read_payload
-init_agent_id
-[ -n "${SESSION_ID:-}" ] || exit 0
-
-PROMPT="$(payload_field prompt)"
-case "$PROMPT" in
+# Match the sentinel on the raw payload, before any node spawn: `<<bus>>` needs
+# no JSON escaping, so the substring test is exact, and this hook runs on every
+# single user prompt -- the ordinary prompt must cost zero process starts.
+case "$PAYLOAD" in
   *"<<bus>>"*) ;;            # legacy sentinel -> drain
   *) exit 0 ;;              # ordinary prompt -> no-op
 esac
+
+init_agent_id
+[ -n "${SESSION_ID:-}" ] || exit 0
 
 emit_drain UserPromptSubmit
 exit 0

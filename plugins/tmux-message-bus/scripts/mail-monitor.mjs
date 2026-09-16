@@ -57,8 +57,9 @@ function touchLock() {
       LOCK_FILE,
       JSON.stringify({ tag: LOCK_TAG, sid: SESSION_ID, pid: process.pid, beatAt: Date.now() }),
     );
+    return true;
   } catch {
-    /* unwritable -> run unlocked */
+    return false; // unwritable -> run unlocked
   }
 }
 
@@ -76,7 +77,6 @@ try {
   rec = JSON.parse(readFileSync(LOCK_FILE, "utf8"));
 } catch {
   // Missing, unreadable, or a bare pid from <=2.1.0: no live claim to honour.
-  rec = null;
 }
 // Only a record this script wrote, for this session, that someone refreshed
 // within the grace window blocks a start. Liveness is the weaker of the two
@@ -91,8 +91,10 @@ if (
 ) {
   process.exit(0);
 }
-touchLock();
-setInterval(touchLock, BEAT_MS).unref();
+// Arm the beat only if the claim landed: where the lock dir is unwritable every
+// write is doomed, and beating at it forever would burn one failed syscall per
+// BEAT_MS for the whole session to no effect.
+if (touchLock()) setInterval(touchLock, BEAT_MS).unref();
 
 // One-line invariant: control chars would let a peer-supplied field (subject,
 // but also from_agent/kind — senders self-assert identity) forge a second
