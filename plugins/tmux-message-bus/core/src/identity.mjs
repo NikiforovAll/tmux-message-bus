@@ -11,16 +11,26 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-// Failures no retry can fix: tmux is not on PATH, or its socket does not exist
-// (no server). Only a socket that exists but refuses or times out is transient.
-// Worth telling apart because the sleep below lands on turn-blocking paths --
-// register runs on every prompt and every Stop.
+// Failures no retry can fix: tmux is not on PATH, its socket does not exist (no
+// server), or the exec blew the deadline below -- a breached deadline is itself
+// evidence the server is not answering, and retrying it would double the stall
+// on turn-blocking paths (register runs on every prompt and every Stop). Only a
+// socket that exists and *refuses* is transient.
 function permanentFailure(err) {
   return (
     err.code === "ENOENT" ||
+    err.code === "ETIMEDOUT" ||
     /no server running|\(No such file or directory\)/i.test(String(err.stderr ?? ""))
   );
 }
+
+// Deadline per exec. The refused connection above has a worse sibling: the
+// server stops answering on the accept path and a bare `tmux` blocks forever,
+// which wedges the calling hook AND leaves a stuck client behind that makes the
+// stall worse (kill-server and attach then hang too). A deadline turns that into
+// the unknown verdict the tri-state callers already handle. Overridable so a
+// loaded host can buy slack without a rebuild.
+const EXEC_TIMEOUT_MS = Number(process.env.BUS_TMUX_TIMEOUT_MS) || 1500;
 
 // One retry by default. The tmux socket on Windows/MSYS intermittently refuses a
 // connection ("error connecting to ... (Connection timed out)") and answers fine
@@ -30,7 +40,10 @@ function permanentFailure(err) {
 function tmux(args, retries = 1) {
   for (let attempt = 0; ; attempt++) {
     try {
-      return execFileSync("tmux", args, { encoding: "utf8" }).trim();
+      return execFileSync("tmux", args, {
+        encoding: "utf8",
+        timeout: EXEC_TIMEOUT_MS,
+      }).trim();
     } catch (err) {
       if (attempt >= retries || permanentFailure(err)) throw err;
       sleepSync(150);
